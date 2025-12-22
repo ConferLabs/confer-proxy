@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package confer;
+
+// NoiseTransportFrame is used to split large messages into smaller frames that fit within
+// the Noise protocol's maximum payload size (65535 bytes). This framing layer is
+// agnostic to the content being transmitted - it just chunks and reassembles bytes.
+message NoiseTransportFrame {
+  optional int64  chunk_id     = 1;
+  optional uint32 chunk_index  = 2;
+  optional uint32 total_chunks = 3;
+  optional bytes  payload      = 4;
+}
+
+// WebsocketRequest is the application-layer message format for client-server communication.
+message WebsocketRequest {
+  optional int64  id   = 1;
+  optional string verb = 2;
+  optional string path = 3;
+  optional bytes  body = 4;
+}
+
+// WebsocketResponse is the application-layer message format for server-client communication.
+message WebsocketResponse {
+  optional int64 id     = 1;
+  optional int32 status = 2;
+  optional bytes body   = 3;
+}

@@ -1,0 +1,20 @@
+# Maven build output
+target/
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+
+# Environment config
+.env
+src/main/resources/META-INF/microprofile-config.properties

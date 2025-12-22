@@ -1,0 +1,260 @@
+name: Release Proxy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (without v prefix)'
+        required: true
+        default: '0.1.0'
+      confirm_production:
+        description: 'Type PRODUCTION to confirm publishing to production Sigstore (only needed for non-snapshot releases)'
+        required: false
+
+env:
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+
+jobs:
+  # First job: determine versions and environment
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      proxy_version: ${{ steps.version.outputs.version }}
+      image_version: ${{ steps.image.outputs.version }}
+      is_staging: ${{ steps.sigstore.outputs.staging }}
+      rekor_url: ${{ steps.sigstore.outputs.rekor_url }}
+      fulcio_url: ${{ steps.sigstore.outputs.fulcio_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+
+      - name: Read image version
+        id: image
+        run: echo "version=$(cat image-version)" >> $GITHUB_OUTPUT
+
+      - name: Determine Sigstore environment
+        id: sigstore
+        run: |
+          IMAGE_VERSION=$(cat image-version)
+          PROXY_VERSION=${{ steps.version.outputs.version }}
+          COMBINED="${IMAGE_VERSION}-${PROXY_VERSION}"
+
+          if echo "$COMBINED" | grep -iq "snapshot"; then
+            echo "Using Sigstore STAGING environment"
+            echo "staging=true" >> $GITHUB_OUTPUT
+            echo "rekor_url=https://rekor.sigstage.dev" >> $GITHUB_OUTPUT
+            echo "fulcio_url=https://fulcio.sigstage.dev" >> $GITHUB_OUTPUT
+          else
+            echo "Using Sigstore PRODUCTION environment"
+            echo "staging=false" >> $GITHUB_OUTPUT
+            echo "rekor_url=https://rekor.sigstore.dev" >> $GITHUB_OUTPUT
+            echo "fulcio_url=https://fulcio.sigstore.dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Verify production confirmation
+        if: steps.sigstore.outputs.staging == 'false'
+        run: |
+          echo "=========================================="
+          echo "  WARNING: PRODUCTION SIGSTORE RELEASE"
+          echo "=========================================="
+          echo ""
+          echo "This release will be signed with PRODUCTION Sigstore."
+          echo "Version: ${{ steps.version.outputs.version }}"
+          echo ""
+
+          if [ "${{ github.event.inputs.confirm_production }}" != "PRODUCTION" ]; then
+            echo "ERROR: Production release requires confirmation."
+            echo ""
+            echo "To proceed, re-run this workflow and type 'PRODUCTION'"
+            echo "in the 'confirm_production' input field."
+            exit 1
+          fi
+
+          echo "Production release confirmed. Proceeding..."
+
+      - name: Verify git tag exists for production release
+        if: steps.sigstore.outputs.staging == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          echo "Checking for git tag: $TAG"
+
+          git fetch --tags
+          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "ERROR: Git tag '$TAG' not found."
+            echo ""
+            echo "Production releases require a matching git tag."
+            echo "Create the tag with: git tag $TAG && git push origin $TAG"
+            exit 1
+          fi
+
+          TAG_COMMIT=$(git rev-parse "$TAG")
+          HEAD_COMMIT=$(git rev-parse HEAD)
+
+          echo "Tag '$TAG' points to: $TAG_COMMIT"
+          echo "HEAD is at: $HEAD_COMMIT"
+
+          if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+            echo ""
+            echo "ERROR: Tag '$TAG' does not point to HEAD."
+            echo ""
+            echo "The tag must point to the current commit."
+            echo "Either checkout the tagged commit, or move the tag:"
+            echo "  git tag -f $TAG && git push origin $TAG --force"
+            exit 1
+          fi
+
+          echo "Git tag '$TAG' verified at HEAD. Proceeding..."
+
+  # Second job: build and sign
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.is_staging == 'true' && 'staging' || 'production' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Verify version matches
+        run: |
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [ "$POM_VERSION" != "${{ needs.prepare.outputs.proxy_version }}" ]; then
+            echo "Version mismatch: pom.xml has $POM_VERSION but tag/input is ${{ needs.prepare.outputs.proxy_version }}"
+            exit 1
+          fi
+
+      - name: Build and upload proxy (ship profile)
+        run: mvn -B package -Pship -DskipTests
+
+      - name: Download image artifacts
+        run: |
+          IMAGE_VERSION=${{ needs.prepare.outputs.image_version }}
+          mkdir -p image-artifacts
+          aws s3 cp s3://${S3_BUCKET}/images/${IMAGE_VERSION}/vmlinuz image-artifacts/
+          aws s3 cp s3://${S3_BUCKET}/images/${IMAGE_VERSION}/initrd image-artifacts/
+          aws s3 cp s3://${S3_BUCKET}/images/${IMAGE_VERSION}/cmdline image-artifacts/
+
+      - name: Install tdx-measure
+        run: |
+          curl -L https://github.com/virtee/tdx-measure/releases/download/v0.0.10/tdx-measure -o tdx-measure
+          chmod +x tdx-measure
+          sudo mv tdx-measure /usr/local/bin/
+
+      - name: Compute proxy hash
+        id: proxy-hash
+        run: |
+          PROXY_HASH=$(sha256sum target/proxy-*.zip | cut -d' ' -f1)
+          echo "hash=${PROXY_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Build full cmdline
+        run: |
+          BASE_CMDLINE=$(cat image-artifacts/cmdline)
+          PROXY_HASH=${{ steps.proxy-hash.outputs.hash }}
+          echo "${BASE_CMDLINE} proxy-hash=sha256:${PROXY_HASH}" > image-artifacts/full-cmdline
+
+      - name: Compute TDX measurements
+        id: measurements
+        run: |
+          CMDLINE=$(cat image-artifacts/full-cmdline)
+          cat > tdx_metadata.json << EOF
+          {
+            "boot_config": {
+              "cpus": 128,
+              "memory": "1024G",
+              "bios": "",
+              "acpi_tables": "",
+              "rsdp": "",
+              "table_loader": ""
+            },
+            "direct": {
+              "kernel": "image-artifacts/vmlinuz",
+              "initrd": "image-artifacts/initrd",
+              "cmdline": "${CMDLINE}"
+            }
+          }
+          EOF
+          tdx-measure tdx_metadata.json --runtime-only --direct-boot=true --json-file measurements.json
+          cat measurements.json
+
+      - name: Create manifest
+        run: |
+          IMAGE_VERSION=${{ needs.prepare.outputs.image_version }}
+          PROXY_VERSION=${{ needs.prepare.outputs.proxy_version }}
+
+          # Create manifest with canonical JSON formatting (sorted keys, consistent spacing)
+          jq -n --sort-keys \
+            --arg imageVersion "$IMAGE_VERSION" \
+            --arg proxyVersion "$PROXY_VERSION" \
+            --slurpfile tdx measurements.json \
+            '{imageVersion: $imageVersion, proxyVersion: $proxyVersion, tdxMeasurements: $tdx[0]}' \
+            > manifest.json
+
+          cat manifest.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.SIGSTORE_SERVICE_ACCOUNT_KEY }}
+
+      - name: Sign manifest with Sigstore
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          # Generate short-lived identity token from service account
+          IDENTITY_TOKEN=$(gcloud auth print-identity-token --audiences=sigstore)
+
+          COSIGN_ARGS=(
+            --yes
+            --new-bundle-format
+            --rekor-url=${{ needs.prepare.outputs.rekor_url }}
+            --fulcio-url=${{ needs.prepare.outputs.fulcio_url }}
+            --identity-token="$IDENTITY_TOKEN"
+            --bundle manifest.bundle.json
+          )
+
+          # Only skip verification for staging environment
+          if [ "${{ needs.prepare.outputs.is_staging }}" = "true" ]; then
+            COSIGN_ARGS+=(--insecure-skip-verify)
+          fi
+
+          cosign sign-blob "${COSIGN_ARGS[@]}" manifest.json
+
+          cat manifest.bundle.json
+
+      - name: Upload release artifacts to S3
+        run: |
+          IMAGE_VERSION=${{ needs.prepare.outputs.image_version }}
+          PROXY_VERSION=${{ needs.prepare.outputs.proxy_version }}
+          RELEASE_PATH="releases/${IMAGE_VERSION}-${PROXY_VERSION}"
+          MANIFEST_HASH=$(sha256sum manifest.json | cut -d' ' -f1)
+
+          aws s3 cp manifest.json s3://${S3_BUCKET}/${RELEASE_PATH}/manifest.json
+          aws s3 cp manifest.bundle.json s3://${S3_BUCKET}/${RELEASE_PATH}/manifest.bundle.json
+          aws s3 cp image-artifacts/full-cmdline s3://${S3_BUCKET}/${RELEASE_PATH}/cmdline
+
+          # Also upload manifest by hash for Rekor lookups
+          aws s3 cp manifest.json s3://${S3_BUCKET}/manifests/${MANIFEST_HASH}.json
+

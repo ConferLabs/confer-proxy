@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{36} [%file:%line] - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="LOGGING" class="com.logtail.logback.LogtailAppender">
+        <appName>confer-proxy</appName>
+        <sourceToken>${LOGGING_SOURCE_TOKEN}</sourceToken>
+        <ingestUrl>${LOGGING_INGEST_URL}</ingestUrl>
+        <mdcFields>app</mdcFields>
+        <includeCallerData>true</includeCallerData>
+        <objectMapperModule>com.fasterxml.jackson.datatype.jdk8.Jdk8Module</objectMapperModule>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="LOGGING" />
+    </root>
+</configuration>
