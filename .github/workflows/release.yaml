@@ -94,7 +94,7 @@ jobs:
             exit 1
           fi
 
-          TAG_COMMIT=$(git rev-parse "$TAG")
+          TAG_COMMIT=$(git rev-list -n 1 "$TAG")
           HEAD_COMMIT=$(git rev-parse HEAD)
 
           echo "Tag '$TAG' points to: $TAG_COMMIT"
