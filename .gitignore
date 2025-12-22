@@ -17,4 +17,3 @@ target/
 
 # Environment config
 .env
-src/main/resources/META-INF/microprofile-config.properties
