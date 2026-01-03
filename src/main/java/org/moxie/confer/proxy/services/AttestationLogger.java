@@ -45,7 +45,7 @@ public class AttestationLogger {
       }
 
     } catch (AttestationException e) {
-      log.warn("Unable to get attestation", e);
+      log.error("[ALERT] Attestation startup failed: unable to get signed attestation", e);
     }
   }
 
