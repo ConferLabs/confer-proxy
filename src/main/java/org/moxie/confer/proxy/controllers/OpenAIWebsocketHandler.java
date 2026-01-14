@@ -13,6 +13,7 @@ import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
+import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
@@ -21,6 +22,7 @@ import org.moxie.confer.proxy.entities.ChatRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.entities.ToolCallContent;
 import org.moxie.confer.proxy.entities.ToolResponseContent;
+import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.tools.Tool;
 import org.moxie.confer.proxy.tools.ToolRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
@@ -35,17 +37,17 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
   private static final Logger log = LoggerFactory.getLogger(OpenAIWebsocketHandler.class);
 
-  private static final int MAX_TOOL_ITERATIONS = 10;
-
   private final OpenAIClient client;
   private final ObjectMapper mapper;
   private final ToolRegistry toolRegistry;
+  private final Config config;
 
   @Inject
-  public OpenAIWebsocketHandler(OpenAIClient client, ObjectMapper mapper, ToolRegistry toolRegistry) {
+  public OpenAIWebsocketHandler(OpenAIClient client, ObjectMapper mapper, ToolRegistry toolRegistry, Config config) {
     this.client       = client;
     this.mapper       = mapper;
     this.toolRegistry = toolRegistry;
+    this.config       = config;
   }
 
   @Override
@@ -81,17 +83,27 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   }
 
   private String handleNonStreamingRequest(ChatModel model, ChatRequest chatRequest) {
-    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>());
+    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>(), true);
     return client.chat().completions().create(params).choices().getFirst().message().content().orElse("");
   }
 
   private StreamingOutput handleStreamingResponse(ChatModel model, ChatRequest chatRequest) {
     return output -> {
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
+      int maxIterations = config.getMaxToolIterations();
       int iteration = 0;
 
-      while (iteration++ < MAX_TOOL_ITERATIONS) {
-        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory);
+      while (iteration++ < maxIterations) {
+        boolean isLastIteration = iteration >= maxIterations;
+
+        if (isLastIteration) {
+          ChatCompletionUserMessageParam wrapUpMessage = ChatCompletionUserMessageParam.builder()
+              .content("[System: You have used all available tool calls. Please provide your final response to the user now based on the information you have gathered. Do not attempt to use any tools.]")
+              .build();
+          conversationHistory.add(ChatCompletionMessageParam.ofUser(wrapUpMessage));
+        }
+
+        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration);
         ChunkProcessor             processor = new ChunkProcessor(mapper);
 
         try (StreamResponse<ChatCompletionChunk> response = client.chat().completions().createStreaming(params)) {
@@ -100,46 +112,44 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
         Map<Integer, ToolCallAccumulator> toolCalls = processor.getToolCalls();
 
-        if (!toolCalls.isEmpty()) {
-          for (ToolCallAccumulator acc : toolCalls.values()) {
-            sendToolCallToClient(acc, output);
-          }
-
-          conversationHistory.add(buildAssistantMessageWithToolCalls(toolCalls));
-
-          for (ToolCallAccumulator acc : toolCalls.values()) {
-            Optional<Tool> tool = toolRegistry.getTool(acc.functionName);
-
-            if (tool.isPresent()) {
-              String toolResult = tool.get().execute(acc.arguments.toString(), acc.id, output);
-
-              ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
-                                                                                         .toolCallId(acc.id)
-                                                                                         .content(toolResult)
-                                                                                         .build();
-              conversationHistory.add(ChatCompletionMessageParam.ofTool(toolMessage));
-
-              // Client-friendly result (possibly summarized) goes to client for persistence
-              String clientResult = tool.get().getClientResult(toolResult);
-              sendToolResponseToClient(acc.id, acc.functionName, clientResult, output);
-            } else {
-              log.warn("Unknown tool function: {}", acc.functionName);
-            }
-          }
-        } else {
+        if (toolCalls.isEmpty()) {
           sendCompletion(output);
-          break;
+          return;
+        }
+
+        for (ToolCallAccumulator acc : toolCalls.values()) {
+          sendToolCallToClient(acc, output);
+        }
+
+        conversationHistory.add(buildAssistantMessageWithToolCalls(toolCalls));
+
+        for (ToolCallAccumulator acc : toolCalls.values()) {
+          Optional<Tool> tool = toolRegistry.getTool(acc.functionName);
+
+          if (tool.isPresent()) {
+            String toolResult = tool.get().execute(acc.arguments.toString(), acc.id, output);
+
+            ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
+                                                                                       .toolCallId(acc.id)
+                                                                                       .content(toolResult)
+                                                                                       .build();
+            conversationHistory.add(ChatCompletionMessageParam.ofTool(toolMessage));
+
+            // Client-friendly result (possibly summarized) goes to client for persistence
+            String clientResult = tool.get().getClientResult(toolResult);
+            sendToolResponseToClient(acc.id, acc.functionName, clientResult, output);
+          } else {
+            log.warn("Unknown tool function: {}", acc.functionName);
+          }
         }
       }
 
-      if (iteration >= MAX_TOOL_ITERATIONS) {
-        log.warn("Reached maximum tool calling iterations ({})", MAX_TOOL_ITERATIONS);
-        sendCompletion(output);
-      }
+      log.warn("Reached maximum tool calling iterations ({})", maxIterations);
+      sendCompletion(output);
     };
   }
 
-  private ChatCompletionCreateParams buildCompletionParams(ChatModel model, ChatRequest chatRequest, List<ChatCompletionMessageParam> additionalMessages) {
+  private ChatCompletionCreateParams buildCompletionParams(ChatModel model, ChatRequest chatRequest, List<ChatCompletionMessageParam> additionalMessages, boolean includeTools) {
     ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                                                                            .model(model);
 
@@ -205,7 +215,9 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       builder.addMessage(message);
     }
 
-    addToolsToBuilder(builder);
+    if (includeTools) {
+      addToolsToBuilder(builder);
+    }
 
     return builder.build();
   }

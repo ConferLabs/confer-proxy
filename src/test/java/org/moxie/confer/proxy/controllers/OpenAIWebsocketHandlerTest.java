@@ -18,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.entities.ChatRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
+import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.tools.Tool;
 import org.moxie.confer.proxy.tools.ToolRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
@@ -38,6 +39,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class OpenAIWebsocketHandlerTest {
@@ -54,13 +56,17 @@ class OpenAIWebsocketHandlerTest {
   @Mock
   private ToolRegistry toolRegistry;
 
+  @Mock
+  private Config config;
+
   private ObjectMapper mapper;
   private OpenAIWebsocketHandler handler;
 
   @BeforeEach
   void setUp() {
     mapper = new ObjectMapper();
-    handler = new OpenAIWebsocketHandler(openAIClient, mapper, toolRegistry);
+    lenient().when(config.getMaxToolIterations()).thenReturn(10);
+    handler = new OpenAIWebsocketHandler(openAIClient, mapper, toolRegistry, config);
   }
 
   @Test
@@ -796,6 +802,261 @@ class OpenAIWebsocketHandlerTest {
     // Should only have "Hi", not empty content
     assertFalse(output.contains("\"content\":\"\""));
     assertTrue(output.contains("\"content\":\"Hi\""));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void handle_streamingMaxIterations_removesToolsOnLastIteration() throws Exception {
+    // Set max iterations to 2
+    when(config.getMaxToolIterations()).thenReturn(2);
+
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Search for cats")),
+        "gpt-4",
+        null,
+        null,
+        true,
+        null,
+        null,
+        null
+    );
+    WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
+
+    // First response: tool call
+    ChatCompletionChunk toolCallChunk1 = mock(ChatCompletionChunk.class);
+    ChatCompletionChunk.Choice toolCallChoice1 = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta toolCallDelta1 = mock(ChatCompletionChunk.Choice.Delta.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall toolCall1 = mock(ChatCompletionChunk.Choice.Delta.ToolCall.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall.Function toolCallFunction1 = mock(ChatCompletionChunk.Choice.Delta.ToolCall.Function.class);
+
+    when(toolCallChunk1.choices()).thenReturn(List.of(toolCallChoice1));
+    when(toolCallChoice1.delta()).thenReturn(toolCallDelta1);
+    when(toolCallChoice1.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS));
+    when(toolCallDelta1.toolCalls()).thenReturn(Optional.of(List.of(toolCall1)));
+    when(toolCall1.index()).thenReturn(0L);
+    when(toolCall1.id()).thenReturn(Optional.of("call_1"));
+    when(toolCall1.function()).thenReturn(Optional.of(toolCallFunction1));
+    when(toolCallFunction1.name()).thenReturn(Optional.of("web_search"));
+    when(toolCallFunction1.arguments()).thenReturn(Optional.of("{\"query\":\"cats\"}"));
+
+    StreamResponse<ChatCompletionChunk> firstStreamResponse = mock(StreamResponse.class);
+    when(firstStreamResponse.stream()).thenReturn(Stream.of(toolCallChunk1));
+
+    // Second response (last iteration, no tools): final answer
+    ChatCompletionChunk answerChunk = mock(ChatCompletionChunk.class);
+    ChatCompletionChunk.Choice answerChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta answerDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+
+    when(answerChunk.choices()).thenReturn(List.of(answerChoice));
+    when(answerChoice.delta()).thenReturn(answerDelta);
+    when(answerChoice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(answerDelta.content()).thenReturn(Optional.of("Here's what I found about cats."));
+    when(answerDelta.toolCalls()).thenReturn(Optional.empty());
+
+    StreamResponse<ChatCompletionChunk> secondStreamResponse = mock(StreamResponse.class);
+    when(secondStreamResponse.stream()).thenReturn(Stream.of(answerChunk));
+
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(firstStreamResponse)
+        .thenReturn(secondStreamResponse);
+
+    // Mock tool
+    Tool mockTool = mock(Tool.class);
+    FunctionDefinition funcDef = FunctionDefinition.builder().name("web_search").build();
+    when(mockTool.getFunctionDefinition()).thenReturn(funcDef);
+    when(mockTool.execute(anyString(), anyString(), any(OutputStream.class))).thenReturn("Search results");
+    when(mockTool.getClientResult(anyString())).thenReturn("Search results");
+
+    when(toolRegistry.getAllTools()).thenReturn(Map.of("web_search", mockTool));
+    when(toolRegistry.getTool("web_search")).thenReturn(Optional.of(mockTool));
+
+    WebsocketHandlerResponse response = handler.handle(request);
+    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
+
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    streamingResponse.stream().write(outputStream);
+
+    // Capture the params from both calls
+    var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+    verify(completionService, times(2)).createStreaming(paramsCaptor.capture());
+
+    List<ChatCompletionCreateParams> allParams = paramsCaptor.getAllValues();
+
+    // First call should have tools
+    assertTrue(allParams.get(0).tools().isPresent());
+    assertEquals(1, allParams.get(0).tools().get().size());
+
+    // Second call (last iteration) should NOT have tools
+    assertTrue(allParams.get(1).tools().isEmpty() || allParams.get(1).tools().get().isEmpty());
+
+    // Second call should have the wrap-up instruction message
+    List<com.openai.models.chat.completions.ChatCompletionMessageParam> secondCallMessages = allParams.get(1).messages();
+    boolean hasWrapUpMessage = secondCallMessages.stream()
+        .anyMatch(msg -> msg.toString().contains("You have used all available tool calls"));
+    assertTrue(hasWrapUpMessage, "Second call should include wrap-up instruction message");
+
+    // Verify output contains the final response
+    String output = outputStream.toString();
+    assertTrue(output.contains("Here's what I found about cats."));
+    assertTrue(output.contains("\"type\":\"completion\""));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void handle_streamingNormalCompletion_noWrapUpMessage() throws Exception {
+    // With default max iterations (10), a single tool call followed by completion
+    // should NOT include the wrap-up message
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Search for dogs")),
+        "gpt-4",
+        null,
+        null,
+        true,
+        null,
+        null,
+        null
+    );
+    WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
+
+    // First response: tool call
+    ChatCompletionChunk toolCallChunk = mock(ChatCompletionChunk.class);
+    ChatCompletionChunk.Choice toolCallChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta toolCallDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall toolCall = mock(ChatCompletionChunk.Choice.Delta.ToolCall.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall.Function toolCallFunction = mock(ChatCompletionChunk.Choice.Delta.ToolCall.Function.class);
+
+    when(toolCallChunk.choices()).thenReturn(List.of(toolCallChoice));
+    when(toolCallChoice.delta()).thenReturn(toolCallDelta);
+    when(toolCallChoice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS));
+    when(toolCallDelta.toolCalls()).thenReturn(Optional.of(List.of(toolCall)));
+    when(toolCall.index()).thenReturn(0L);
+    when(toolCall.id()).thenReturn(Optional.of("call_1"));
+    when(toolCall.function()).thenReturn(Optional.of(toolCallFunction));
+    when(toolCallFunction.name()).thenReturn(Optional.of("web_search"));
+    when(toolCallFunction.arguments()).thenReturn(Optional.of("{\"query\":\"dogs\"}"));
+
+    StreamResponse<ChatCompletionChunk> firstStreamResponse = mock(StreamResponse.class);
+    when(firstStreamResponse.stream()).thenReturn(Stream.of(toolCallChunk));
+
+    // Second response: final answer (no tool calls)
+    ChatCompletionChunk answerChunk = mock(ChatCompletionChunk.class);
+    ChatCompletionChunk.Choice answerChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta answerDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+
+    when(answerChunk.choices()).thenReturn(List.of(answerChoice));
+    when(answerChoice.delta()).thenReturn(answerDelta);
+    when(answerChoice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(answerDelta.content()).thenReturn(Optional.of("Dogs are loyal pets."));
+    when(answerDelta.toolCalls()).thenReturn(Optional.empty());
+
+    StreamResponse<ChatCompletionChunk> secondStreamResponse = mock(StreamResponse.class);
+    when(secondStreamResponse.stream()).thenReturn(Stream.of(answerChunk));
+
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(firstStreamResponse)
+        .thenReturn(secondStreamResponse);
+
+    // Mock tool
+    Tool mockTool = mock(Tool.class);
+    FunctionDefinition funcDef = FunctionDefinition.builder().name("web_search").build();
+    when(mockTool.getFunctionDefinition()).thenReturn(funcDef);
+    when(mockTool.execute(anyString(), anyString(), any(OutputStream.class))).thenReturn("Search results");
+    when(mockTool.getClientResult(anyString())).thenReturn("Search results");
+
+    when(toolRegistry.getAllTools()).thenReturn(Map.of("web_search", mockTool));
+    when(toolRegistry.getTool("web_search")).thenReturn(Optional.of(mockTool));
+
+    WebsocketHandlerResponse response = handler.handle(request);
+    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
+
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    streamingResponse.stream().write(outputStream);
+
+    // Capture all params
+    var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+    verify(completionService, times(2)).createStreaming(paramsCaptor.capture());
+
+    List<ChatCompletionCreateParams> allParams = paramsCaptor.getAllValues();
+
+    // Both calls should have tools (neither is the last iteration)
+    assertTrue(allParams.get(0).tools().isPresent());
+    assertTrue(allParams.get(1).tools().isPresent());
+
+    // Neither call should have the wrap-up message
+    for (ChatCompletionCreateParams params : allParams) {
+      boolean hasWrapUpMessage = params.messages().stream()
+          .anyMatch(msg -> msg.toString().contains("You have used all available tool calls"));
+      assertFalse(hasWrapUpMessage, "Normal completion should not include wrap-up message");
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void handle_streamingMaxIterationsOne_immediateWrapUp() throws Exception {
+    // Edge case: maxIterations = 1 means the first call is also the last
+    when(config.getMaxToolIterations()).thenReturn(1);
+
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Hello")),
+        "gpt-4",
+        null,
+        null,
+        true,
+        null,
+        null,
+        null
+    );
+    WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
+
+    // Response: final answer (no tools available)
+    ChatCompletionChunk answerChunk = mock(ChatCompletionChunk.class);
+    ChatCompletionChunk.Choice answerChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta answerDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+
+    when(answerChunk.choices()).thenReturn(List.of(answerChoice));
+    when(answerChoice.delta()).thenReturn(answerDelta);
+    when(answerChoice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(answerDelta.content()).thenReturn(Optional.of("Hello there!"));
+    when(answerDelta.toolCalls()).thenReturn(Optional.empty());
+
+    StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
+    when(streamResponse.stream()).thenReturn(Stream.of(answerChunk));
+
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(streamResponse);
+
+    lenient().when(toolRegistry.getAllTools()).thenReturn(Map.of());
+
+    WebsocketHandlerResponse response = handler.handle(request);
+    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
+
+    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    streamingResponse.stream().write(outputStream);
+
+    // Capture params
+    var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+    verify(completionService, times(1)).createStreaming(paramsCaptor.capture());
+
+    ChatCompletionCreateParams params = paramsCaptor.getValue();
+
+    // Should NOT have tools (it's the last/only iteration)
+    assertTrue(params.tools().isEmpty() || params.tools().get().isEmpty());
+
+    // Should have wrap-up message
+    boolean hasWrapUpMessage = params.messages().stream()
+        .anyMatch(msg -> msg.toString().contains("You have used all available tool calls"));
+    assertTrue(hasWrapUpMessage, "maxIterations=1 should include wrap-up message on first call");
+
+    // Output should still work
+    String output = outputStream.toString();
+    assertTrue(output.contains("Hello there!"));
+    assertTrue(output.contains("\"type\":\"completion\""));
   }
 
   @Test

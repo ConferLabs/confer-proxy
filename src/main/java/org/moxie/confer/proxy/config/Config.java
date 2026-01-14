@@ -48,6 +48,10 @@ public class Config {
   @ConfigProperty(name = "manifest.bundle.path", defaultValue = "/run/confer/manifest.bundle.json")
   private String manifestBundlePath;
 
+  @Inject
+  @ConfigProperty(name = "max_tool_iterations", defaultValue = "10")
+  private int maxToolIterations;
+
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
       return new LinkedList<>();
@@ -84,5 +88,9 @@ public class Config {
 
   public String getManifestBundlePath() {
     return manifestBundlePath;
+  }
+
+  public int getMaxToolIterations() {
+    return maxToolIterations;
   }
 }
