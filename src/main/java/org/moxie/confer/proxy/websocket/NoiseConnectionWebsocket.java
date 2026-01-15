@@ -170,7 +170,7 @@ public abstract class NoiseConnectionWebsocket {
 
       // 3. Application layer: handle complete message (only when all frames received)
       if (completeMessage != null) {
-        onReceiveMessage(session, completeMessage, 0, completeMessage.length);
+        onReceiveMessage(session, completeMessage);
       }
     } catch (ShortBufferException | BadPaddingException e) {
       log.warn("Decryption failed", e);
@@ -183,28 +183,26 @@ public abstract class NoiseConnectionWebsocket {
     }
   }
 
-  protected abstract void onReceiveMessage(Session session, byte[] data, int offset, int length);
+  protected abstract void onReceiveMessage(Session session, byte[] data);
 
-  protected void sendMessage(Session session, byte[] data, int offset, int length) {
-    try {
-      // 1. Application layer: extract the message bytes
-      byte[] messageBytes = new byte[length];
-      System.arraycopy(data, offset, messageBytes, 0, length);
+  protected void sendMessage(Session session, byte[] data) {
+    synchronized (this) {
+      try {
+        // 1. Framing layer: split into frames
+        List<byte[]> frames = NoiseTransportFramer.encodeFrames(data);
 
-      // 2. Framing layer: split into frames
-      List<byte[]> frames = NoiseTransportFramer.encodeFrames(messageBytes);
+        // 2. Transport layer: encrypt and send each frame
+        for (byte[] frame : frames) {
+          byte[] ciphertext = new byte[frame.length + 16];
+          int ciphertextLength = sendCipher.encryptWithAd(null, frame, 0, ciphertext, 0, frame.length);
 
-      // 3. Transport layer: encrypt and send each frame
-      for (byte[] frame : frames) {
-        byte[] ciphertext = new byte[frame.length + 16];
-        int ciphertextLength = sendCipher.encryptWithAd(null, frame, 0, ciphertext, 0, frame.length);
-
-        session.getBasicRemote().sendBinary(ByteBuffer.wrap(ciphertext, 0, ciphertextLength));
+          session.getBasicRemote().sendBinary(ByteBuffer.wrap(ciphertext, 0, ciphertextLength));
+        }
+      } catch (ShortBufferException e) {
+        throw new AssertionError(e);
+      } catch (IOException e) {
+        log.warn("Failed to send encrypted message", e);
       }
-    } catch (ShortBufferException e) {
-      throw new AssertionError(e);
-    } catch (IOException e) {
-      log.warn("Failed to send encrypted message", e);
     }
   }
 

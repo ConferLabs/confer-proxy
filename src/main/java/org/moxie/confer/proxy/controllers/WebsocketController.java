@@ -56,15 +56,16 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   }
 
   @Override
-  protected void onReceiveMessage(Session session, byte[] data, int offset, int length) {
+  protected void onReceiveMessage(Session session, byte[] data) {
+    Thread.startVirtualThread(() -> handleRequest(session, data));
+  }
+
+  private void handleRequest(Session session, byte[] data) {
     WebsocketRequest request;
 
     try {
-      byte[] messageBytes = new byte[length];
-      System.arraycopy(data, offset, messageBytes, 0, length);
-
       confer.NoiseTransport.WebsocketRequest protoRequest =
-          confer.NoiseTransport.WebsocketRequest.parseFrom(messageBytes);
+          confer.NoiseTransport.WebsocketRequest.parseFrom(data);
 
       request = WebsocketRequest.fromProtobuf(protoRequest);
     } catch (com.google.protobuf.InvalidProtocolBufferException e) {
@@ -78,8 +79,8 @@ public class WebsocketController extends NoiseConnectionWebsocket {
     }
 
     Instant tokenExpiry = (Instant) session.getUserProperties().get("tokenExpiry");
-    Boolean subscribed = (Boolean) session.getUserProperties().get("subscribed");
-    boolean isFreeTier = subscribed == null || !subscribed;
+    Boolean subscribed  = (Boolean) session.getUserProperties().get("subscribed" );
+    boolean isFreeTier  = subscribed == null || !subscribed;
 
     if (isFreeTier && tokenExpiry != null && Instant.now().isAfter(tokenExpiry)) {
       sendResponseError(session, request.id(), 402, "Payment required");
@@ -110,7 +111,7 @@ public class WebsocketController extends NoiseConnectionWebsocket {
             WebsocketResponse response     = new WebsocketResponse(request.id(), statusCode, body);
             byte[]            responseData = response.toProtobuf().toByteArray();
 
-            sendMessage(session, responseData, 0, responseData.length);
+            sendMessage(session, responseData);
           }
           case WebsocketHandlerResponse.StreamingResponse(var stream) -> {
             WebsocketOutputStream outputStream = new WebsocketOutputStream(session, request.id());
@@ -131,7 +132,7 @@ public class WebsocketController extends NoiseConnectionWebsocket {
     WebsocketResponse response   = new WebsocketResponse(id, status, message);
     byte[]            serialized = response.toProtobuf().toByteArray();
 
-    sendMessage(session, serialized, 0, serialized.length);
+    sendMessage(session, serialized);
   }
 
   private class WebsocketOutputStream extends OutputStream {
@@ -160,7 +161,7 @@ public class WebsocketController extends NoiseConnectionWebsocket {
     public void write(byte[] b, int offset, int length) throws IOException {
       WebsocketResponse response   = new WebsocketResponse(id, 200, new String(b, offset, length));
       byte[]            serialized = response.toProtobuf().toByteArray();
-      sendMessage(session, serialized, 0, serialized.length);
+      sendMessage(session, serialized);
     }
   }
 
