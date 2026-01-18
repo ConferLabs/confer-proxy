@@ -52,6 +52,18 @@ public class Config {
   @ConfigProperty(name = "max_tool_iterations", defaultValue = "10")
   private int maxToolIterations;
 
+  @Inject
+  @ConfigProperty(name = "mcp.enabled", defaultValue = "false")
+  private boolean mcpEnabled;
+
+  @Inject
+  @ConfigProperty(name = "mcp.servers.config", defaultValue = "")
+  private String mcpServersConfig;
+
+  @Inject
+  @ConfigProperty(name = "mcp.request.timeout.seconds", defaultValue = "30")
+  private int mcpRequestTimeoutSeconds;
+
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
       return new LinkedList<>();
@@ -92,5 +104,17 @@ public class Config {
 
   public int getMaxToolIterations() {
     return maxToolIterations;
+  }
+
+  public boolean isMcpEnabled() {
+    return mcpEnabled;
+  }
+
+  public String getMcpServersConfig() {
+    return mcpServersConfig;
+  }
+
+  public int getMcpRequestTimeoutSeconds() {
+    return mcpRequestTimeoutSeconds;
   }
 }
