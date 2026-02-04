@@ -1,4 +1,5 @@
 package org.moxie.confer.proxy.controllers;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
@@ -11,6 +12,7 @@ import org.moxie.confer.proxy.attestation.AttestationService;
 import org.moxie.confer.proxy.auth.WebsocketAuthenticator;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.entities.WebsocketResponse;
+import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.websocket.NoiseConnectionWebsocket;
 import org.moxie.confer.proxy.websocket.Route;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
@@ -40,7 +42,11 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   @Inject
   PingWebsocketHandler pingWebsocketHandler;
 
-  private final Map<Route, WebsocketHandler> routes = new HashMap<>();
+  @Inject
+  DocumentExtractionHandler documentExtractionHandler;
+
+  private final Map<Route, WebsocketHandler> routes         = new HashMap<>();
+  private final StreamRegistry               streamRegistry = new StreamRegistry();
 
   @Inject
   public WebsocketController(AttestationService attestationService, ObjectMapper mapper)
@@ -52,7 +58,14 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   private void initializeRoutes() {
     routes.put(new Route("POST", "/v1/vllm/chat/completions"), vllmWebsocketHandler);
     routes.put(new Route("POST", "/v1/together/chat/completions"), togetherAIWebsocketHandler);
+    routes.put(new Route("POST", "/v1/document/extract"), documentExtractionHandler);
     routes.put(new Route("GET", "/ping"), pingWebsocketHandler);
+  }
+
+  @Override
+  public void onClose(Session session, CloseReason closeReason) {
+    super.onClose(session, closeReason);
+    streamRegistry.cancelAll();
   }
 
   @Override
@@ -78,6 +91,12 @@ public class WebsocketController extends NoiseConnectionWebsocket {
       return;
     }
 
+    // Handle stream continuation chunks (no verb/path, just id + chunk)
+    if (request.isStreamContinuation()) {
+      handleStreamChunk(session, request);
+      return;
+    }
+
     Instant tokenExpiry = (Instant) session.getUserProperties().get("tokenExpiry");
     Boolean subscribed  = (Boolean) session.getUserProperties().get("subscribed" );
     boolean isFreeTier  = subscribed == null || !subscribed;
@@ -87,44 +106,71 @@ public class WebsocketController extends NoiseConnectionWebsocket {
       return;
     }
 
-    Route            route   = new Route(request.verb(), request.path());
+    Route            route   = new Route(request.verb().orElse(""), request.path().orElse(""));
     WebsocketHandler handler = routes.get(route);
 
-    if (handler != null) {
-      WebsocketHandlerResponse handlerResponse;
-
-      try {
-        handlerResponse = handler.handle(request);
-      } catch (WebApplicationException e) {
-        log.warn("Error processing request", e);
-        sendResponseError(session, request.id(), e.getResponse().getStatus(), e.getMessage());
-        return;
-      } catch (Exception e) {
-        log.warn("Error processing request", e);
-        sendResponseError(session, request.id(), 500, "Internal Server Error");
-        return;
-      }
-
-      try {
-        switch (handlerResponse) {
-          case WebsocketHandlerResponse.SingleResponse(int statusCode, String body) -> {
-            WebsocketResponse response     = new WebsocketResponse(request.id(), statusCode, body);
-            byte[]            responseData = response.toProtobuf().toByteArray();
-
-            sendMessage(session, responseData);
-          }
-          case WebsocketHandlerResponse.StreamingResponse(var stream) -> {
-            WebsocketOutputStream outputStream = new WebsocketOutputStream(session, request.id());
-            stream.write(outputStream);
-          }
-        }
-      } catch (IOException e) {
-        log.warn("IOError processing response", e);
-        sendResponseError(session, request.id(), 500, "IO Error");
-      }
-    } else {
+    if (handler == null) {
       log.warn("No handler found for route: {}", route);
       sendResponseError(session, request.id(), 404, "Route not found");
+      return;
+    }
+
+    WebsocketHandlerResponse handlerResponse;
+
+    try {
+      handlerResponse = handler.handle(request, streamRegistry);
+    } catch (WebApplicationException e) {
+      log.warn("Error processing request", e);
+      sendResponseError(session, request.id(), e.getResponse().getStatus(), e.getMessage());
+      return;
+    } catch (Exception e) {
+      log.warn("Error processing request", e);
+      sendResponseError(session, request.id(), 500, "Internal Server Error");
+      return;
+    }
+
+    sendHandlerResponse(session, request.id(), handlerResponse);
+  }
+
+  private void handleStreamChunk(Session session, WebsocketRequest request) {
+    if (request.chunk().isEmpty()) {
+      log.warn("Stream continuation without chunk data");
+      sendResponseError(session, request.id(), 400, "Chunk data required");
+      return;
+    }
+
+    try {
+      WebsocketRequest.StreamChunk chunk = request.chunk().get();
+      streamRegistry.handleChunk(request.id(), chunk.data(), chunk.sequenceNumber(), chunk.isFinal());
+    } catch (IllegalStateException e) {
+      log.warn("Stream {} already completed", request.id());
+      sendResponseError(session, request.id(), 400, "Stream already completed");
+    } catch (IOException e) {
+      log.warn("Error writing chunk", e);
+      streamRegistry.cancelStream(request.id());
+      sendResponseError(session, request.id(), 500, "Stream write failed");
+    }
+  }
+
+  private void sendHandlerResponse(Session session, long requestId, WebsocketHandlerResponse handlerResponse) {
+    try {
+      switch (handlerResponse) {
+        case WebsocketHandlerResponse.SingleResponse(int statusCode, String body) -> {
+          WebsocketResponse response = new WebsocketResponse(requestId, statusCode, body);
+          byte[] responseData = response.toProtobuf().toByteArray();
+          sendMessage(session, responseData);
+        }
+        case WebsocketHandlerResponse.StreamingResponse(Map<String, String> headers, jakarta.ws.rs.core.StreamingOutput stream) -> {
+          WebsocketOutputStream outputStream = new WebsocketOutputStream(session, requestId, headers);
+          stream.write(outputStream);
+        }
+      }
+    } catch (WebApplicationException e) {
+      log.warn("Error during streaming response", e);
+      sendResponseError(session, requestId, e.getResponse().getStatus(), e.getMessage());
+    } catch (IOException e) {
+      log.warn("IOError processing response", e);
+      sendResponseError(session, requestId, 500, "IO Error");
     }
   }
 
@@ -137,12 +183,14 @@ public class WebsocketController extends NoiseConnectionWebsocket {
 
   private class WebsocketOutputStream extends OutputStream {
 
-    private final Session session;
-    private final long    id;
+    private final Session             session;
+    private final long                id;
+    private final Map<String, String> headers;
 
-    private WebsocketOutputStream(Session session, long id) {
+    private WebsocketOutputStream(Session session, long id, Map<String, String> headers) {
       this.session = session;
       this.id      = id;
+      this.headers = headers;
     }
 
     @Override
@@ -159,7 +207,7 @@ public class WebsocketController extends NoiseConnectionWebsocket {
 
     @Override
     public void write(byte[] b, int offset, int length) throws IOException {
-      WebsocketResponse response   = new WebsocketResponse(id, 200, new String(b, offset, length));
+      WebsocketResponse response   = new WebsocketResponse(id, 200, b, offset, length, headers);
       byte[]            serialized = response.toProtobuf().toByteArray();
       sendMessage(session, serialized);
     }

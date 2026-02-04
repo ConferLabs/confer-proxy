@@ -12,17 +12,26 @@ message NoiseTransportFrame {
   optional bytes  payload      = 4;
 }
 
+// StreamChunk carries a piece of streaming data.
+message StreamChunk {
+  optional bytes  data  = 1;
+  optional bool   final = 2;
+  optional uint32 seq   = 3;
+}
+
 // WebsocketRequest is the application-layer message format for client-server communication.
 message WebsocketRequest {
-  optional int64  id   = 1;
-  optional string verb = 2;
-  optional string path = 3;
-  optional bytes  body = 4;
+  optional int64       id    = 1;
+  optional string      verb  = 2;
+  optional string      path  = 3;
+  optional bytes       body  = 4;
+  optional StreamChunk chunk = 5;
 }
 
 // WebsocketResponse is the application-layer message format for server-client communication.
 message WebsocketResponse {
-  optional int64 id     = 1;
-  optional int32 status = 2;
-  optional bytes body   = 3;
+  optional int64      id      = 1;
+  optional int32      status  = 2;
+  optional bytes      body    = 3;
+  map<string, string> headers = 4;
 }

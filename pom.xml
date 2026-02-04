@@ -11,9 +11,9 @@
     <packaging>jar</packaging>
 
     <properties>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.source>25</maven.compiler.source>
+        <maven.compiler.target>25</maven.compiler.target>
+        <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.build.outputTimestamp>1990-01-01T00:00:00Z</project.build.outputTimestamp>
         <helidon.version>4.2.6</helidon.version>
@@ -235,7 +235,7 @@
                 <configuration>
                     <skip>false</skip>
                     <from>
-                        <image>gcr.io/distroless/java21-debian12:nonroot</image>
+                        <image>gcr.io/distroless/java-base-debian12:nonroot</image>
                         <platforms>
                             <platform>
                                 <architecture>amd64</architecture>

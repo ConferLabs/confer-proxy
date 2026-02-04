@@ -14,9 +14,16 @@ import org.moxie.confer.proxy.attestation.AttestationService;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
+import jakarta.websocket.CloseReason;
+import jakarta.ws.rs.WebApplicationException;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -91,7 +98,7 @@ class WebsocketControllerTest {
     AtomicInteger fastHandlerCallCount = new AtomicInteger(0);
 
     // Slow handler that blocks until we signal it
-    WebsocketHandler slowHandler = request -> {
+    WebsocketHandler slowHandler = (request, registry) -> {
       slowHandlerCallCount.incrementAndGet();
       slowHandlerStarted.countDown();
       try {
@@ -103,7 +110,7 @@ class WebsocketControllerTest {
     };
 
     // Fast handler (like ping) that completes immediately
-    WebsocketHandler fastHandler = request -> {
+    WebsocketHandler fastHandler = (request, registry) -> {
       fastHandlerCallCount.incrementAndGet();
       fastHandlerCompleted.countDown();
       return new WebsocketHandlerResponse.SingleResponse(200, "pong");
@@ -150,7 +157,7 @@ class WebsocketControllerTest {
     CountDownLatch handlerStarted = new CountDownLatch(1);
     CountDownLatch handlerCanFinish = new CountDownLatch(1);
 
-    WebsocketHandler blockingHandler = request -> {
+    WebsocketHandler blockingHandler = (request, registry) -> {
       handlerStarted.countDown();
       try {
         handlerCanFinish.await(10, TimeUnit.SECONDS);
@@ -195,6 +202,229 @@ class WebsocketControllerTest {
     assertFalse(sentMessages.isEmpty(), "Should have sent a response");
   }
 
+  @Test
+  void onReceiveMessage_invalidProtobuf_closesSession() throws Exception {
+    when(session.isOpen()).thenReturn(true);
+    controller.setRoutes(Map.of());
+
+    byte[] invalidData = "not a protobuf".getBytes();
+    controller.testOnReceiveMessage(session, invalidData);
+
+    Thread.sleep(100);
+
+    verify(session, atLeastOnce()).close(any(CloseReason.class));
+  }
+
+  @Test
+  void onReceiveMessage_missingRequiredFields_closesSession() throws Exception {
+    when(session.isOpen()).thenReturn(true);
+    controller.setRoutes(Map.of());
+
+    // Protobuf with no ID
+    byte[] request = confer.NoiseTransport.WebsocketRequest.newBuilder()
+        .setVerb("GET")
+        .setPath("/test")
+        .build()
+        .toByteArray();
+
+    controller.testOnReceiveMessage(session, request);
+
+    Thread.sleep(100);
+
+    verify(session, atLeastOnce()).close(any(CloseReason.class));
+  }
+
+  @Test
+  void onReceiveMessage_handlerThrowsWebApplicationException_returnsErrorStatus() throws Exception {
+    WebsocketHandler throwingHandler = (request, registry) -> {
+      throw new WebApplicationException("Bad request", 400);
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("POST", "/error"), throwingHandler
+    ));
+
+    byte[] request = createProtobufRequest(1, "POST", "/error", "");
+    controller.testOnReceiveMessage(session, request);
+
+    Thread.sleep(100);
+
+    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+  }
+
+  @Test
+  void onReceiveMessage_handlerThrowsException_returns500() throws Exception {
+    WebsocketHandler throwingHandler = (request, registry) -> {
+      throw new RuntimeException("Unexpected error");
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("POST", "/crash"), throwingHandler
+    ));
+
+    byte[] request = createProtobufRequest(1, "POST", "/crash", "");
+    controller.testOnReceiveMessage(session, request);
+
+    Thread.sleep(100);
+
+    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+  }
+
+  @Test
+  void onReceiveMessage_streamContinuation_handlesChunk() throws Exception {
+    CountDownLatch chunkReceived = new CountDownLatch(1);
+
+    WebsocketHandler streamHandler = (request, registry) -> {
+      return new WebsocketHandlerResponse.StreamingResponse(output -> {
+        try {
+          // Register the stream and wait for chunks
+          var ctx = registry.createStream(request.id(), new ByteArrayOutputStream());
+          chunkReceived.await(5, TimeUnit.SECONDS);
+          output.write("done".getBytes());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      });
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("POST", "/stream"), streamHandler
+    ));
+
+    // Send initial streaming request
+    byte[] initialRequest = createStreamingProtobufRequest(1, "POST", "/stream", "", "chunk1".getBytes(), 0, false);
+    controller.testOnReceiveMessage(session, initialRequest);
+
+    Thread.sleep(50);
+
+    // Send continuation chunk
+    byte[] continuation = createContinuationChunk(1, "chunk2".getBytes(), 1, true);
+    controller.testOnReceiveMessage(session, continuation);
+
+    chunkReceived.countDown();
+
+    Thread.sleep(100);
+  }
+
+  @Test
+  void onReceiveMessage_streamContinuationWithoutChunk_returns400() throws Exception {
+    when(session.isOpen()).thenReturn(true);
+    controller.setRoutes(Map.of());
+
+    // Continuation with no chunk data (only id, no verb/path, no chunk)
+    byte[] invalidContinuation = confer.NoiseTransport.WebsocketRequest.newBuilder()
+        .setId(1)
+        .build()
+        .toByteArray();
+
+    controller.testOnReceiveMessage(session, invalidContinuation);
+
+    Thread.sleep(100);
+
+    // Should close since it's invalid (no verb/path and no chunk)
+    verify(session, atLeastOnce()).close(any(CloseReason.class));
+  }
+
+  @Test
+  void onReceiveMessage_freeTierExpiredToken_returns402() throws Exception {
+    Map<String, Object> userProps = new HashMap<>();
+    userProps.put("tokenExpiry", Instant.now().minusSeconds(60)); // Expired
+    userProps.put("subscribed", false);
+    when(session.getUserProperties()).thenReturn(userProps);
+
+    WebsocketHandler handler = (request, registry) -> {
+      return new WebsocketHandlerResponse.SingleResponse(200, "ok");
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("GET", "/test"), handler
+    ));
+
+    byte[] request = createProtobufRequest(1, "GET", "/test", null);
+    controller.testOnReceiveMessage(session, request);
+
+    Thread.sleep(100);
+
+    assertFalse(sentMessages.isEmpty(), "Should have sent a 402 response");
+  }
+
+  @Test
+  void onReceiveMessage_subscribedUser_bypassesTokenExpiry() throws Exception {
+    Map<String, Object> userProps = new HashMap<>();
+    userProps.put("tokenExpiry", Instant.now().minusSeconds(60)); // Expired
+    userProps.put("subscribed", true);
+    when(session.getUserProperties()).thenReturn(userProps);
+
+    CountDownLatch handlerCalled = new CountDownLatch(1);
+    WebsocketHandler handler = (request, registry) -> {
+      handlerCalled.countDown();
+      return new WebsocketHandlerResponse.SingleResponse(200, "ok");
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("GET", "/test"), handler
+    ));
+
+    byte[] request = createProtobufRequest(1, "GET", "/test", null);
+    controller.testOnReceiveMessage(session, request);
+
+    assertTrue(handlerCalled.await(1, TimeUnit.SECONDS), "Handler should be called for subscribed user");
+  }
+
+  @Test
+  void onReceiveMessage_streamingResponse_writesToOutput() throws Exception {
+    java.util.concurrent.CountDownLatch handlerComplete = new java.util.concurrent.CountDownLatch(1);
+
+    WebsocketHandler streamingHandler = (request, registry) -> {
+      return new WebsocketHandlerResponse.StreamingResponse(output -> {
+        output.write("chunk1".getBytes());
+        output.write("chunk2".getBytes());
+        handlerComplete.countDown();
+      });
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("GET", "/stream"), streamingHandler
+    ));
+
+    byte[] request = createProtobufRequest(1, "GET", "/stream", null);
+    controller.testOnReceiveMessage(session, request);
+
+    assertTrue(handlerComplete.await(5, TimeUnit.SECONDS), "Handler should complete");
+    assertTrue(sentMessages.size() >= 2, "Should have sent multiple streaming responses but got " + sentMessages.size());
+  }
+
+  @Test
+  void onReceiveMessage_streamingResponseThrowsIOException_sendsError() throws Exception {
+    WebsocketHandler streamingHandler = (request, registry) -> {
+      return new WebsocketHandlerResponse.StreamingResponse(output -> {
+        throw new IOException("Write failed");
+      });
+    };
+
+    controller.setRoutes(Map.of(
+        new org.moxie.confer.proxy.websocket.Route("GET", "/stream"), streamingHandler
+    ));
+
+    byte[] request = createProtobufRequest(1, "GET", "/stream", null);
+    controller.testOnReceiveMessage(session, request);
+
+    Thread.sleep(100);
+
+    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+  }
+
+  @Test
+  void onClose_cancelsAllStreams() throws Exception {
+    controller.setRoutes(Map.of());
+
+    CloseReason closeReason = new CloseReason(CloseReason.CloseCodes.NORMAL_CLOSURE, "Test");
+    controller.testOnClose(session, closeReason);
+
+    // Should not throw - streamRegistry.cancelAll() is called
+  }
+
+
   private byte[] createProtobufRequest(long id, String verb, String path, String body) {
     confer.NoiseTransport.WebsocketRequest.Builder builder = confer.NoiseTransport.WebsocketRequest.newBuilder()
         .setId(id)
@@ -206,6 +436,40 @@ class WebsocketControllerTest {
     }
 
     return builder.build().toByteArray();
+  }
+
+  private byte[] createStreamingProtobufRequest(long id, String verb, String path, String body, byte[] chunkData, int seq, boolean isFinal) {
+    confer.NoiseTransport.StreamChunk chunk = confer.NoiseTransport.StreamChunk.newBuilder()
+        .setData(ByteString.copyFrom(chunkData))
+        .setSeq(seq)
+        .setFinal(isFinal)
+        .build();
+
+    confer.NoiseTransport.WebsocketRequest.Builder builder = confer.NoiseTransport.WebsocketRequest.newBuilder()
+        .setId(id)
+        .setVerb(verb)
+        .setPath(path)
+        .setChunk(chunk);
+
+    if (body != null) {
+      builder.setBody(ByteString.copyFromUtf8(body));
+    }
+
+    return builder.build().toByteArray();
+  }
+
+  private byte[] createContinuationChunk(long id, byte[] chunkData, int seq, boolean isFinal) {
+    confer.NoiseTransport.StreamChunk chunk = confer.NoiseTransport.StreamChunk.newBuilder()
+        .setData(ByteString.copyFrom(chunkData))
+        .setSeq(seq)
+        .setFinal(isFinal)
+        .build();
+
+    return confer.NoiseTransport.WebsocketRequest.newBuilder()
+        .setId(id)
+        .setChunk(chunk)
+        .build()
+        .toByteArray();
   }
 
   /**
@@ -248,6 +512,10 @@ class WebsocketControllerTest {
 
     void testOnReceiveMessage(Session session, byte[] data) {
       onReceiveMessage(session, data);
+    }
+
+    void testOnClose(Session session, CloseReason closeReason) {
+      onClose(session, closeReason);
     }
   }
 }

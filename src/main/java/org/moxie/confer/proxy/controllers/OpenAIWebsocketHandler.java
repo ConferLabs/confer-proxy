@@ -23,6 +23,7 @@ import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.entities.ToolCallContent;
 import org.moxie.confer.proxy.entities.ToolResponseContent;
 import org.moxie.confer.proxy.config.Config;
+import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.tools.Tool;
 import org.moxie.confer.proxy.tools.ToolRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
@@ -51,7 +52,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   }
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request) {
+  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry streamRegistry) {
     ChatRequest chatRequest = parseChatRequest(request);
     ChatModel   model       = parseModel(chatRequest);
 

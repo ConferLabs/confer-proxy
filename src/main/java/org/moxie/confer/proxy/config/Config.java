@@ -52,6 +52,14 @@ public class Config {
   @ConfigProperty(name = "max_tool_iterations", defaultValue = "10")
   private int maxToolIterations;
 
+  @Inject
+  @ConfigProperty(name = "docling.enabled", defaultValue = "false")
+  private boolean doclingEnabled;
+
+  @Inject
+  @ConfigProperty(name = "docling.port", defaultValue = "5001")
+  private int doclingPort;
+
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
       return new LinkedList<>();
@@ -92,5 +100,13 @@ public class Config {
 
   public int getMaxToolIterations() {
     return maxToolIterations;
+  }
+
+  public boolean isDoclingEnabled() {
+    return doclingEnabled;
+  }
+
+  public int getDoclingPort() {
+    return doclingPort;
   }
 }
