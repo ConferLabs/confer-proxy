@@ -27,11 +27,7 @@ public class Config {
   @Inject
   @ConfigProperty(name = "site_url")
   private String siteUrl;
-
-  @Inject
-  @ConfigProperty(name = "together_api_key")
-  private String togetherApiKey;
-
+  
   @Inject
   @ConfigProperty(name = "tavily_api_key")
   private String tavilyApiKey;
@@ -80,10 +76,6 @@ public class Config {
 
   public String getSiteUrl() {
     return siteUrl;
-  }
-
-  public String getTogetherApiKey() {
-    return togetherApiKey;
   }
 
   public String getTavilyApiKey() {

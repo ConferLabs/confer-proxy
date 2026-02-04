@@ -36,10 +36,6 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   OpenAIWebsocketHandler vllmWebsocketHandler;
 
   @Inject
-  @Named("together")
-  OpenAIWebsocketHandler togetherAIWebsocketHandler;
-
-  @Inject
   PingWebsocketHandler pingWebsocketHandler;
 
   @Inject
@@ -57,7 +53,6 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   @PostConstruct
   private void initializeRoutes() {
     routes.put(new Route("POST", "/v1/vllm/chat/completions"), vllmWebsocketHandler);
-    routes.put(new Route("POST", "/v1/together/chat/completions"), togetherAIWebsocketHandler);
     routes.put(new Route("POST", "/v1/document/extract"), documentExtractionHandler);
     routes.put(new Route("GET", "/ping"), pingWebsocketHandler);
   }
