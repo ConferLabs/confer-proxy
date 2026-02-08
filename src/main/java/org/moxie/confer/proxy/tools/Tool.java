@@ -26,6 +26,14 @@ public interface Tool {
   String execute(String arguments, String toolCallId, OutputStream output);
 
   /**
+   * Whether this tool makes external network requests (e.g. web search, page fetch).
+   * Tools that return true can be disabled by the client via the webSearch flag.
+   */
+  default boolean hasExternalRequests() {
+    return false;
+  }
+
+  /**
    * Get the client-friendly version of a tool result for persistence.
    * By default, returns the full result. Tools can override to provide
    * a summarized version to avoid storing large content.

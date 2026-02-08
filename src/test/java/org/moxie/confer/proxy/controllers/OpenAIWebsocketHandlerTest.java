@@ -98,6 +98,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -113,6 +114,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         false,
+        null,
         null,
         null,
         null
@@ -149,6 +151,7 @@ class OpenAIWebsocketHandlerTest {
         true,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -167,6 +170,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         true,
+        null,
         null,
         null,
         null
@@ -224,6 +228,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -255,6 +260,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         100,
         false,
+        null,
         null,
         null,
         null
@@ -289,6 +295,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         false,
         true,
+        null,
         null,
         null
     );
@@ -328,6 +335,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -359,6 +367,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         false,
+        null,
         null,
         null,
         null
@@ -394,6 +403,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         false,
+        null,
         null,
         null,
         null
@@ -433,6 +443,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         false,
+        null,
         null,
         null,
         null
@@ -476,6 +487,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -513,6 +525,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -537,6 +550,7 @@ class OpenAIWebsocketHandlerTest {
         false,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -554,6 +568,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         true,
+        null,
         null,
         null,
         null
@@ -641,6 +656,7 @@ class OpenAIWebsocketHandlerTest {
         true,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -712,6 +728,7 @@ class OpenAIWebsocketHandlerTest {
         true,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -759,6 +776,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         true,
+        null,
         null,
         null,
         null
@@ -819,6 +837,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         true,
+        null,
         null,
         null,
         null
@@ -919,6 +938,7 @@ class OpenAIWebsocketHandlerTest {
         true,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -1011,6 +1031,7 @@ class OpenAIWebsocketHandlerTest {
         true,
         null,
         null,
+        null,
         null
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
@@ -1070,6 +1091,7 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         false,
+        null,
         null,
         null,
         null

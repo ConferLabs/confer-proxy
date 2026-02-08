@@ -5,10 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.client.OpenAIClient;
 import com.openai.core.http.StreamResponse;
 import com.openai.models.ChatModel;
+import com.openai.models.FunctionDefinition;
+import com.openai.models.FunctionParameters;
 import com.openai.models.ResponseFormatJsonObject;
 import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionChunk;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.openai.models.chat.completions.ChatCompletionFunctionTool;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
@@ -32,7 +35,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class OpenAIWebsocketHandler implements WebsocketHandler {
 
@@ -41,9 +46,8 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   private final OpenAIClient client;
   private final ObjectMapper mapper;
   private final ToolRegistry toolRegistry;
-  private final Config config;
+  private final Config       config;
 
-  @Inject
   public OpenAIWebsocketHandler(OpenAIClient client, ObjectMapper mapper, ToolRegistry toolRegistry, Config config) {
     this.client       = client;
     this.mapper       = mapper;
@@ -91,8 +95,10 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   private StreamingOutput handleStreamingResponse(ChatModel model, ChatRequest chatRequest) {
     return output -> {
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
-      int maxIterations = config.getMaxToolIterations();
-      int iteration = 0;
+      int                              maxIterations       = config.getMaxToolIterations();
+      int                              iteration           = 0;
+
+      Set<String> clientToolNames = chatRequest.clientTools() != null ? chatRequest.clientTools().stream().map(ChatRequest.ClientTool::name).collect(Collectors.toSet()) : Set.of();
 
       while (iteration++ < maxIterations) {
         boolean isLastIteration = iteration >= maxIterations;
@@ -111,42 +117,51 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
           response.stream().forEach(chunk -> processor.processChunk(chunk, output));
         }
 
-        Map<Integer, ToolCallAccumulator> toolCalls = processor.getToolCalls();
+        ToolCallRequests toolCalls = processor.getToolCallRequests(clientToolNames);
 
-        if (toolCalls.isEmpty()) {
-          sendCompletion(output);
+        if (!toolCalls.hasToolCalls()) {
+          sendCompletion(output, false);
           return;
         }
 
-        for (ToolCallAccumulator acc : toolCalls.values()) {
-          sendToolCallToClient(acc, output);
+        conversationHistory.add(buildAssistantMessageWithToolCalls(toolCalls.all()));
+
+        for (ToolCallRequest req : toolCalls.serverToolCalls()) {
+          sendToolCallToClient(req, output);
         }
 
-        conversationHistory.add(buildAssistantMessageWithToolCalls(toolCalls));
-
-        for (ToolCallAccumulator acc : toolCalls.values()) {
-          Optional<Tool> tool = toolRegistry.getTool(acc.functionName);
+        for (ToolCallRequest req : toolCalls.serverToolCalls()) {
+          Optional<Tool> tool = toolRegistry.getTool(req.functionName());
 
           if (tool.isPresent()) {
-            String toolResult = tool.get().execute(acc.arguments.toString(), acc.id, output);
+            String fullResult   = tool.get().execute(req.arguments(), req.id(), output);
+            String clientResult = tool.get().getClientResult(fullResult);
 
             ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
-                                                                                       .toolCallId(acc.id)
-                                                                                       .content(toolResult)
+                                                                                       .toolCallId(req.id())
+                                                                                       .content(fullResult)
                                                                                        .build();
             conversationHistory.add(ChatCompletionMessageParam.ofTool(toolMessage));
 
-            // Client-friendly result (possibly summarized) goes to client for persistence
-            String clientResult = tool.get().getClientResult(toolResult);
-            sendToolResponseToClient(acc.id, acc.functionName, clientResult, output);
+            sendToolResponseToClient(req.id(), req.functionName(), clientResult, toolCalls.hasClientToolCalls() ? fullResult : null, output);
           } else {
-            log.warn("Unknown tool function: {}", acc.functionName);
+            log.warn("Unknown tool function: {}", req.functionName());
           }
+        }
+
+        // Send client tool calls after server tools are done
+        if (toolCalls.hasClientToolCalls()) {
+          for (ToolCallRequest req : toolCalls.clientToolCalls()) {
+            sendClientToolCallToClient(req, output);
+          }
+
+          sendCompletion(output, true);
+          return;
         }
       }
 
       log.warn("Reached maximum tool calling iterations ({})", maxIterations);
-      sendCompletion(output);
+      sendCompletion(output, false);
     };
   }
 
@@ -217,30 +232,50 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
 
     if (includeTools) {
-      addToolsToBuilder(builder);
+      addToolsToBuilder(builder, chatRequest.webSearch(), chatRequest.clientTools());
     }
 
     return builder.build();
   }
 
-  private void addToolsToBuilder(ChatCompletionCreateParams.Builder builder) {
+  private void addToolsToBuilder(ChatCompletionCreateParams.Builder builder, Boolean webSearch, List<ChatRequest.ClientTool> clientTools) {
+    boolean includeExternalTools = webSearch == null || webSearch;
+
     for (Tool tool : toolRegistry.getAllTools().values()) {
-      builder.addTool(com.openai.models.chat.completions.ChatCompletionFunctionTool.builder()
-                                                                                   .function(tool.getFunctionDefinition())
-                                                                                   .build());
+      if (includeExternalTools || !tool.hasExternalRequests()) {
+        builder.addTool(ChatCompletionFunctionTool.builder()
+                                                  .function(tool.getFunctionDefinition())
+                                                  .build());
+      }
+    }
+
+    if (clientTools != null) {
+      for (ChatRequest.ClientTool ct : clientTools) {
+        FunctionParameters.Builder paramsBuilder = FunctionParameters.builder();
+        for (Map.Entry<String, Object> entry : ct.parameters().entrySet()) {
+          paramsBuilder.putAdditionalProperty(entry.getKey(), com.openai.core.JsonValue.from(entry.getValue()));
+        }
+
+        builder.addTool(ChatCompletionFunctionTool.builder()
+                                                  .function(FunctionDefinition.builder()
+                                                      .name(ct.name())
+                                                      .description(ct.description())
+                                                      .parameters(paramsBuilder.build())
+                                                      .build())
+                                                  .build());
+      }
     }
   }
 
-
-  private ChatCompletionMessageParam buildAssistantMessageWithToolCalls(Map<Integer, ToolCallAccumulator> toolCalls) {
+  private ChatCompletionMessageParam buildAssistantMessageWithToolCalls(List<ToolCallRequest> toolCalls) {
     List<ChatCompletionMessageToolCall> toolCallsList = new ArrayList<>();
 
-    for (ToolCallAccumulator acc : toolCalls.values()) {
+    for (ToolCallRequest req : toolCalls) {
       ChatCompletionMessageFunctionToolCall functionToolCall = ChatCompletionMessageFunctionToolCall.builder()
-          .id(acc.id)
+          .id(req.id())
           .function(ChatCompletionMessageFunctionToolCall.Function.builder()
-              .name(acc.functionName)
-              .arguments(acc.arguments.toString())
+              .name(req.functionName())
+              .arguments(req.arguments())
               .build())
           .build();
       toolCallsList.add(ChatCompletionMessageToolCall.ofFunction(functionToolCall));
@@ -253,13 +288,13 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     return ChatCompletionMessageParam.ofAssistant(assistantMessageParam);
   }
 
-  private void sendToolCallToClient(ToolCallAccumulator acc, java.io.OutputStream output) {
+  private void sendToolCallToClient(ToolCallRequest req, OutputStream output) {
     try {
       Map<String, Object> toolCallMessage = Map.of(
           "type", "tool_call",
-          "tool_call_id", acc.id,
-          "tool_name", acc.functionName,
-          "tool_arguments", acc.arguments.toString()
+          "tool_call_id", req.id(),
+          "tool_name", req.functionName(),
+          "tool_arguments", req.arguments()
       );
       String message = mapper.writeValueAsString(toolCallMessage);
       output.write(message.getBytes());
@@ -270,14 +305,35 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
   }
 
-  private void sendToolResponseToClient(String toolCallId, String toolName, String toolResult, java.io.OutputStream output) {
+  private void sendClientToolCallToClient(ToolCallRequest req, OutputStream output) {
     try {
-      Map<String, Object> toolResponseMessage = Map.of(
-          "type", "tool_response",
-          "tool_call_id", toolCallId,
-          "tool_name", toolName,
-          "content", toolResult
+      Map<String, Object> toolCallMessage = Map.of(
+          "type", "client_tool_call",
+          "tool_call_id", req.id(),
+          "tool_name", req.functionName(),
+          "tool_arguments", req.arguments()
       );
+      String message = mapper.writeValueAsString(toolCallMessage);
+      output.write(message.getBytes());
+      output.flush();
+    } catch (IOException e) {
+      log.warn("Error sending client tool call message: {}", e.getMessage());
+      throw new WebApplicationException("Streaming error", Response.Status.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  private void sendToolResponseToClient(String toolCallId, String toolName, String content, String fullContent, OutputStream output) {
+    try {
+      Map<String, Object> toolResponseMessage = new LinkedHashMap<>();
+      toolResponseMessage.put("type", "tool_response");
+      toolResponseMessage.put("tool_call_id", toolCallId);
+      toolResponseMessage.put("tool_name", toolName);
+      toolResponseMessage.put("content", content);
+
+      if (fullContent != null) {
+        toolResponseMessage.put("full_content", fullContent);
+      }
+
       String message = mapper.writeValueAsString(toolResponseMessage);
       output.write(message.getBytes());
       output.flush();
@@ -287,14 +343,46 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
   }
 
-  private void sendCompletion(java.io.OutputStream output) {
+  private void sendCompletion(OutputStream output, boolean pendingToolCalls) {
     try {
-      String completionMessage = mapper.writeValueAsString(Map.of("type", "completion"));
+      Map<String, Object> completion = new LinkedHashMap<>();
+      completion.put("type", "completion");
+
+      if (pendingToolCalls) {
+        completion.put("pending_tool_calls", true);
+      }
+
+      String completionMessage = mapper.writeValueAsString(completion);
       output.write(completionMessage.getBytes());
       output.flush();
     } catch (IOException e) {
       log.warn("Error sending stream completion signal: {}", e.getMessage());
       throw new WebApplicationException("Streaming error", Response.Status.INTERNAL_SERVER_ERROR);
+    }
+  }
+
+  record ToolCallRequest(
+    String id,
+    String functionName,
+    String arguments
+  ) {}
+
+  record ToolCallRequests(
+    List<ToolCallRequest> serverToolCalls,
+    List<ToolCallRequest> clientToolCalls
+  ) {
+    boolean hasToolCalls() {
+      return !serverToolCalls.isEmpty() || !clientToolCalls.isEmpty();
+    }
+
+    boolean hasClientToolCalls() {
+      return !clientToolCalls.isEmpty();
+    }
+
+    List<ToolCallRequest> all() {
+      List<ToolCallRequest> all = new ArrayList<>(serverToolCalls);
+      all.addAll(clientToolCalls);
+      return all;
     }
   }
 
@@ -307,7 +395,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       this.mapper = mapper;
     }
 
-    public void processChunk(ChatCompletionChunk chunk, java.io.OutputStream output) {
+    public void processChunk(ChatCompletionChunk chunk, OutputStream output) {
       try {
         if (chunk.choices().isEmpty()) {
           return;
@@ -358,7 +446,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       }
     }
 
-    private void streamContentToOutput(String content, java.io.OutputStream output) throws IOException {
+    private void streamContentToOutput(String content, OutputStream output) throws IOException {
       if (!content.isEmpty()) {
         String tokenMessage = mapper.writeValueAsString(Map.of("type", "token", "content", content));
         output.write(tokenMessage.getBytes());
@@ -366,8 +454,21 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       }
     }
 
-    public Map<Integer, ToolCallAccumulator> getToolCalls() {
-      return toolCalls;
+    public ToolCallRequests getToolCallRequests(Set<String> clientToolNames) {
+      List<ToolCallRequest> serverCalls = new ArrayList<>();
+      List<ToolCallRequest> clientCalls = new ArrayList<>();
+
+      for (ToolCallAccumulator acc : toolCalls.values()) {
+        ToolCallRequest req = new ToolCallRequest(acc.id, acc.functionName, acc.arguments.toString());
+
+        if (clientToolNames.contains(acc.functionName)) {
+          clientCalls.add(req);
+        } else {
+          serverCalls.add(req);
+        }
+      }
+
+      return new ToolCallRequests(serverCalls, clientCalls);
     }
   }
 
