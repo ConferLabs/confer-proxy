@@ -26,7 +26,7 @@ import java.util.concurrent.CompletableFuture;
 public class DoclingHttpClient {
 
   private static final Logger log = LoggerFactory.getLogger(DoclingHttpClient.class);
-  private static final Duration REQUEST_TIMEOUT = Duration.ofMinutes(5);
+  private static final Duration REQUEST_TIMEOUT = Duration.ofMinutes(10);
 
   @Inject
   Config config;
