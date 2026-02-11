@@ -56,6 +56,10 @@ public class Config {
   @ConfigProperty(name = "docling.port", defaultValue = "5001")
   private int doclingPort;
 
+  @Inject
+  @ConfigProperty(name = "vllm.max.model.len", defaultValue = "262144")
+  private int maxContextTokens;
+
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
       return new LinkedList<>();
@@ -100,5 +104,9 @@ public class Config {
 
   public int getDoclingPort() {
     return doclingPort;
+  }
+
+  public int getMaxContextTokens() {
+    return maxContextTokens;
   }
 }

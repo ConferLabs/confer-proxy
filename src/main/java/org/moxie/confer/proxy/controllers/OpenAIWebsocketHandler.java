@@ -12,9 +12,11 @@ import com.openai.models.chat.completions.ChatCompletionAssistantMessageParam;
 import com.openai.models.chat.completions.ChatCompletionChunk;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionFunctionTool;
+import com.openai.models.chat.completions.ChatCompletionStreamOptions;
 import com.openai.models.chat.completions.ChatCompletionMessageFunctionToolCall;
 import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
+import com.openai.models.completions.CompletionUsage;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
 import jakarta.inject.Inject;
@@ -97,6 +99,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
       int                              maxIterations       = config.getMaxToolIterations();
       int                              iteration           = 0;
+      long                             contextTokens       = 0;
 
       Set<String> clientToolNames = chatRequest.clientTools() != null ? chatRequest.clientTools().stream().map(ChatRequest.ClientTool::name).collect(Collectors.toSet()) : Set.of();
 
@@ -117,10 +120,12 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
           response.stream().forEach(chunk -> processor.processChunk(chunk, output));
         }
 
+        contextTokens = processor.getUsage().map(CompletionUsage::totalTokens).orElse(0L);
+
         ToolCallRequests toolCalls = processor.getToolCallRequests(clientToolNames);
 
         if (!toolCalls.hasToolCalls()) {
-          sendCompletion(output, false);
+          sendCompletion(output, false, contextTokens);
           return;
         }
 
@@ -155,19 +160,25 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
             sendClientToolCallToClient(req, output);
           }
 
-          sendCompletion(output, true);
+          sendCompletion(output, true, contextTokens);
           return;
         }
       }
 
       log.warn("Reached maximum tool calling iterations ({})", maxIterations);
-      sendCompletion(output, false);
+      sendCompletion(output, false, contextTokens);
     };
   }
 
   private ChatCompletionCreateParams buildCompletionParams(ChatModel model, ChatRequest chatRequest, List<ChatCompletionMessageParam> additionalMessages, boolean includeTools) {
     ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                                                                            .model(model);
+
+    if (chatRequest.stream()) {
+      builder.streamOptions(ChatCompletionStreamOptions.builder()
+                                                       .includeUsage(true)
+                                                       .build());
+    }
 
     if (chatRequest.temperature() != null) {
       builder.temperature(chatRequest.temperature());
@@ -343,7 +354,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
   }
 
-  private void sendCompletion(OutputStream output, boolean pendingToolCalls) {
+  private void sendCompletion(OutputStream output, boolean pendingToolCalls, long contextTokens) {
     try {
       Map<String, Object> completion = new LinkedHashMap<>();
       completion.put("type", "completion");
@@ -351,6 +362,9 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       if (pendingToolCalls) {
         completion.put("pending_tool_calls", true);
       }
+
+      completion.put("context_tokens", contextTokens);
+      completion.put("max_context_tokens", config.getMaxContextTokens());
 
       String completionMessage = mapper.writeValueAsString(completion);
       output.write(completionMessage.getBytes());
@@ -390,13 +404,20 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
     private final Map<Integer, ToolCallAccumulator> toolCalls = new HashMap<>();
     private final ObjectMapper mapper;
+    private CompletionUsage    usage;
 
     public ChunkProcessor(ObjectMapper mapper) {
       this.mapper = mapper;
     }
 
+    public Optional<CompletionUsage> getUsage() {
+      return Optional.ofNullable(usage);
+    }
+
     public void processChunk(ChatCompletionChunk chunk, OutputStream output) {
       try {
+        chunk.usage().ifPresent(u -> this.usage = u);
+
         if (chunk.choices().isEmpty()) {
           return;
         }
