@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.security.NoSuchAlgorithmException;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 public abstract class NoiseConnectionWebsocket {
 
@@ -29,6 +30,7 @@ public abstract class NoiseConnectionWebsocket {
   private final AttestationService                  attestationService;
   private final ObjectMapper                        mapper;
   private final NoiseTransportFramer.FrameAssembler frameAssembler;
+  private final ReentrantLock                       sendLock;
 
   private HandshakeState handshakeState;
   private CipherState    sendCipher;
@@ -43,6 +45,7 @@ public abstract class NoiseConnectionWebsocket {
     this.attestationService = attestationService;
     this.mapper             = mapper;
     this.frameAssembler     = new NoiseTransportFramer.FrameAssembler();
+    this.sendLock           = new ReentrantLock();
   }
 
   @OnOpen
@@ -186,23 +189,24 @@ public abstract class NoiseConnectionWebsocket {
   protected abstract void onReceiveMessage(Session session, byte[] data);
 
   protected void sendMessage(Session session, byte[] data) {
-    synchronized (this) {
-      try {
-        // 1. Framing layer: split into frames
-        List<byte[]> frames = NoiseTransportFramer.encodeFrames(data);
+    sendLock.lock();
+    try {
+      // 1. Framing layer: split into frames
+      List<byte[]> frames = NoiseTransportFramer.encodeFrames(data);
 
-        // 2. Transport layer: encrypt and send each frame
-        for (byte[] frame : frames) {
-          byte[] ciphertext = new byte[frame.length + 16];
-          int ciphertextLength = sendCipher.encryptWithAd(null, frame, 0, ciphertext, 0, frame.length);
+      // 2. Transport layer: encrypt and send each frame
+      for (byte[] frame : frames) {
+        byte[] ciphertext = new byte[frame.length + 16];
+        int ciphertextLength = sendCipher.encryptWithAd(null, frame, 0, ciphertext, 0, frame.length);
 
-          session.getBasicRemote().sendBinary(ByteBuffer.wrap(ciphertext, 0, ciphertextLength));
-        }
-      } catch (ShortBufferException e) {
-        throw new AssertionError(e);
-      } catch (IOException e) {
-        log.warn("Failed to send encrypted message", e);
+        session.getBasicRemote().sendBinary(ByteBuffer.wrap(ciphertext, 0, ciphertextLength));
       }
+    } catch (ShortBufferException e) {
+      throw new AssertionError(e);
+    } catch (IOException e) {
+      log.warn("Failed to send encrypted message", e);
+    } finally {
+      sendLock.unlock();
     }
   }
 

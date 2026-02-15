@@ -55,6 +55,11 @@ public class WebSearchTool implements Tool {
   }
 
   @Override
+  public boolean hasExternalRequests() {
+    return true;
+  }
+
+  @Override
   public String execute(String arguments, String toolCallId, OutputStream output) {
     try {
       String                             query          = parseSearchQuery(arguments);

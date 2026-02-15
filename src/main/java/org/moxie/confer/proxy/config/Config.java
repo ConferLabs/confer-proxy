@@ -27,11 +27,7 @@ public class Config {
   @Inject
   @ConfigProperty(name = "site_url")
   private String siteUrl;
-
-  @Inject
-  @ConfigProperty(name = "together_api_key")
-  private String togetherApiKey;
-
+  
   @Inject
   @ConfigProperty(name = "tavily_api_key")
   private String tavilyApiKey;
@@ -51,6 +47,18 @@ public class Config {
   @Inject
   @ConfigProperty(name = "max_tool_iterations", defaultValue = "10")
   private int maxToolIterations;
+
+  @Inject
+  @ConfigProperty(name = "docling.enabled", defaultValue = "false")
+  private boolean doclingEnabled;
+
+  @Inject
+  @ConfigProperty(name = "docling.port", defaultValue = "5001")
+  private int doclingPort;
+
+  @Inject
+  @ConfigProperty(name = "vllm.max.model.len", defaultValue = "262144")
+  private int maxContextTokens;
 
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
@@ -74,10 +82,6 @@ public class Config {
     return siteUrl;
   }
 
-  public String getTogetherApiKey() {
-    return togetherApiKey;
-  }
-
   public String getTavilyApiKey() {
     return tavilyApiKey;
   }
@@ -92,5 +96,17 @@ public class Config {
 
   public int getMaxToolIterations() {
     return maxToolIterations;
+  }
+
+  public boolean isDoclingEnabled() {
+    return doclingEnabled;
+  }
+
+  public int getDoclingPort() {
+    return doclingPort;
+  }
+
+  public int getMaxContextTokens() {
+    return maxContextTokens;
   }
 }

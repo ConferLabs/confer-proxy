@@ -8,16 +8,11 @@ import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.controllers.OpenAIWebsocketHandler;
-import org.moxie.confer.proxy.qualifiers.TogetherAI;
 import org.moxie.confer.proxy.qualifiers.VllmAI;
 import org.moxie.confer.proxy.tools.ToolRegistry;
 
 @ApplicationScoped
 public class OpenAIWebsocketHandlerProducer {
-
-  @Inject
-  @TogetherAI
-  OpenAIClient togetherAIClient;
 
   @Inject
   @VllmAI
@@ -31,13 +26,6 @@ public class OpenAIWebsocketHandlerProducer {
 
   @Inject
   Config config;
-
-  @Produces
-  @Named("together")
-  @ApplicationScoped
-  public OpenAIWebsocketHandler produceTogetherAIHandler() {
-    return new OpenAIWebsocketHandler(togetherAIClient, mapper, toolRegistry, config);
-  }
 
   @Produces
   @Named("vllm")
