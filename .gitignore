@@ -17,3 +17,7 @@ target/
 
 # Environment config
 .env
+
+# Embedding model files (downloaded at build time)
+*.onnx
+src/main/resources/models/

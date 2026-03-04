@@ -109,6 +109,18 @@
             <version>2.0.16</version>
         </dependency>
 
+        <!-- Embeddings -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId>
+            <artifactId>onnxruntime</artifactId>
+            <version>1.22.0</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.djl.huggingface</groupId>
+            <artifactId>tokenizers</artifactId>
+            <version>0.36.0</version>
+        </dependency>
+
         <!-- Tests -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -139,6 +151,40 @@
             </extension>
         </extensions>
         <plugins>
+            <!-- Download embedding model at build time -->
+            <plugin>
+                <groupId>io.github.download-maven-plugin</groupId>
+                <artifactId>download-maven-plugin</artifactId>
+                <version>2.1.0</version>
+                <executions>
+                    <execution>
+                        <id>download-embedding-model</id>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>wget</goal>
+                        </goals>
+                        <configuration>
+                            <url>https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0/resolve/main/onnx/model_quantized.onnx</url>
+                            <outputDirectory>${project.basedir}/src/main/resources/models/snowflake-arctic-embed-m-v2.0</outputDirectory>
+                            <outputFileName>model_quantized.onnx</outputFileName>
+                            <sha256>03d923bb1850ebdccb068e2f3abd8aa43fe81c50d07d037ef103fe3d0fb78e3b</sha256>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>download-embedding-tokenizer</id>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>wget</goal>
+                        </goals>
+                        <configuration>
+                            <url>https://huggingface.co/Snowflake/snowflake-arctic-embed-m-v2.0/resolve/main/tokenizer.json</url>
+                            <outputDirectory>${project.basedir}/src/main/resources/models/snowflake-arctic-embed-m-v2.0</outputDirectory>
+                            <outputFileName>tokenizer.json</outputFileName>
+                            <sha256>f1cc44ad7faaeec47241864835473fd5403f2da94673f3f764a77ebcb0a803ec</sha256>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>
