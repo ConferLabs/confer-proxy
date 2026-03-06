@@ -157,6 +157,11 @@ jobs:
       - name: Install tdx-measure
         run: |
           curl -L https://github.com/virtee/tdx-measure/releases/download/v0.0.10/tdx-measure -o tdx-measure
+          TDX_MEASURE_HASH=$(sha256sum tdx-measure)
+          if [ "$TDX_MEASURE_HASH" != '225ee7faed1922b991a0d43a1eba8e71872edc8daf9b73cfeb06b5a37ec812f0' ]; then
+            echo 'ERROR: Integrity verification of tdx-measure failed.'
+            exit 1
+          fi
           chmod +x tdx-measure
           sudo mv tdx-measure /usr/local/bin/
 
