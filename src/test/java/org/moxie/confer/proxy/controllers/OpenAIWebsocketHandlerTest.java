@@ -6,24 +6,44 @@ import com.openai.client.OpenAIClient;
 import com.openai.core.http.StreamResponse;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionChunk;
+import com.openai.models.chat.completions.ChatCompletionContentPart;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
+import com.openai.models.chat.completions.ChatCompletionMessageParam;
+import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.services.blocking.ChatService;
 import com.openai.services.blocking.chat.ChatCompletionService;
+import jakarta.validation.Validation;
+import jakarta.validation.ValidatorFactory;
 import jakarta.ws.rs.WebApplicationException;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.crypto.ImageToken;
+import org.moxie.confer.proxy.documents.DocumentToolSession;
+import org.moxie.confer.proxy.documents.DocumentToolSessionFactory;
+import org.moxie.confer.proxy.documents.InvalidDocumentManifestException;
 import org.moxie.confer.proxy.entities.ChatRequest;
+import org.moxie.confer.proxy.entities.DocumentReference;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.config.Config;
+import org.moxie.confer.proxy.images.ImageReference;
+import org.moxie.confer.proxy.presenters.OpenAIMessagePresenter;
 import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.tools.Tool;
-import org.moxie.confer.proxy.tools.ToolRegistry;
+import org.moxie.confer.proxy.tools.ToolExecutionContext;
+import org.moxie.confer.proxy.tools.ToolImageAttachment;
+import org.moxie.confer.proxy.tools.ToolRequirement;
+import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.tools.registry.RequestToolSet;
+import org.moxie.confer.proxy.tools.registry.ToolEligibility;
+import org.moxie.confer.proxy.tools.registry.ToolRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
 import com.openai.models.FunctionDefinition;
@@ -31,10 +51,15 @@ import org.moxie.confer.proxy.entities.ToolCallContent;
 import org.moxie.confer.proxy.entities.ToolResponseContent;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -46,6 +71,8 @@ import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class OpenAIWebsocketHandlerTest {
+
+  private static ValidatorFactory validatorFactory;
 
   @Mock
   private OpenAIClient openAIClient;
@@ -60,11 +87,32 @@ class OpenAIWebsocketHandlerTest {
   private ToolRegistry toolRegistry;
 
   @Mock
+  private RequestToolSet requestTools;
+
+  private OpenAIMessagePresenter messagePresenter;
+
+  @Mock
+  private DocumentToolSessionFactory documentToolSessions;
+
+  @Mock
+  private DocumentToolSession emptyDocumentSession;
+
+  @Mock
   private Config config;
 
   private ObjectMapper mapper;
   private OpenAIWebsocketHandler handler;
   private StreamRegistry streamRegistry;
+
+  @BeforeAll
+  static void createValidatorFactory() {
+    validatorFactory = Validation.buildDefaultValidatorFactory();
+  }
+
+  @AfterAll
+  static void closeValidatorFactory() {
+    validatorFactory.close();
+  }
 
   private static ChatCompletionChunk mockChunk() {
     ChatCompletionChunk chunk = mock(ChatCompletionChunk.class);
@@ -72,14 +120,44 @@ class OpenAIWebsocketHandlerTest {
     return chunk;
   }
 
+  private static void writeStreamingResponse(
+      WebsocketHandlerResponse.StreamingResponse response,
+      OutputStream output)
+    throws IOException
+  {
+    try (response) {
+      response.writeTo(output);
+    }
+  }
+
+  private void useServerTools(Map<String, Tool> tools) {
+    lenient().when(requestTools.values()).thenReturn(List.copyOf(tools.values()));
+    lenient().when(requestTools.contains(anyString()))
+        .thenAnswer(invocation -> tools.containsKey(invocation.getArgument(0)));
+    lenient().when(requestTools.find(anyString()))
+        .thenAnswer(invocation -> Optional.ofNullable(tools.get(invocation.getArgument(0))));
+  }
+
   @BeforeEach
-  void setUp() {
+  void setUp() throws InvalidDocumentManifestException {
     mapper = new ObjectMapper();
     streamRegistry = new StreamRegistry();
     lenient().when(config.getMaxToolIterations()).thenReturn(10);
     lenient().when(config.getMaxContextTokens()).thenReturn(262144);
     lenient().when(config.getVllmServedModelName()).thenReturn("test-model");
-    handler = new OpenAIWebsocketHandler(openAIClient, mapper, toolRegistry, config, new ImageToken());
+    lenient().when(toolRegistry.forRequest(any(ToolEligibility.class)))
+        .thenReturn(requestTools);
+    lenient().when(documentToolSessions.open(any())).thenReturn(emptyDocumentSession);
+    useServerTools(Map.of());
+    messagePresenter = new OpenAIMessagePresenter(config, new ImageToken());
+    handler = new OpenAIWebsocketHandler(
+        openAIClient,
+        mapper,
+        toolRegistry,
+        config,
+        messagePresenter,
+        documentToolSessions,
+        validatorFactory.getValidator());
   }
 
   @Test
@@ -95,6 +173,38 @@ class OpenAIWebsocketHandlerTest {
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of("not valid json"));
 
     WebApplicationException exception = assertThrows(WebApplicationException.class, () -> handler.handle(request, streamRegistry));
+    assertEquals(400, exception.getResponse().getStatus());
+  }
+
+  @Test
+  void handle_invalidDocumentManifest_throwsBadRequest() throws Exception {
+    DocumentReference reference = new DocumentReference(
+        "document-1",
+        "Jung.pdf",
+        "application/pdf",
+        100,
+        "opaque-namespace-7Kq/document-1",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Summarize section 12", null)),
+        "gpt-4",
+        null, null, null, null, null, null, null, null,
+        true,
+        null, null, null, null,
+        List.of(reference));
+    WebsocketRequest request = new WebsocketRequest(
+        1L,
+        "POST",
+        "/v1/chat/completions",
+        Optional.of(mapper.writeValueAsString(chatRequest)));
+    when(documentToolSessions.open(List.of(reference)))
+        .thenThrow(new InvalidDocumentManifestException("Document reference is invalid"));
+
+    WebsocketHandlerResponse.StreamingResponse response =
+        (WebsocketHandlerResponse.StreamingResponse) handler.handle(request, streamRegistry);
+    WebApplicationException exception = assertThrows(WebApplicationException.class, () ->
+        writeStreamingResponse(response, new ByteArrayOutputStream()));
+
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -119,7 +229,11 @@ class OpenAIWebsocketHandlerTest {
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
 
-    assertThrows(Exception.class, () -> handler.handle(request, streamRegistry));
+    WebApplicationException exception = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(request, streamRegistry));
+
+    assertEquals(400, exception.getResponse().getStatus());
   }
 
   @Test
@@ -153,7 +267,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("Hello back!"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
 
@@ -164,18 +277,26 @@ class OpenAIWebsocketHandlerTest {
   }
 
   @Test
-  void handle_messageWithImageRefs_sendsMultimodalContent() throws Exception {
-    List<ChatRequest.ImageRef> imageRefs = List.of(
-      new ChatRequest.ImageRef("attachments/photo.enc", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "image/jpeg")
+  void handle_messageWithOpaqueImageCapabilities_sendsMultimodalContent() throws Exception {
+    List<ImageReference> imageRefs = List.of(
+      new ImageReference("opaque-namespace-7Kq/photo", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "image/jpeg"),
+      new ImageReference("temporary-images/crop", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "image/png")
     );
     ChatRequest chatRequest = new ChatRequest(
-        List.of(new ChatRequest.Message(ChatRequest.Role.user, "What is in this image?", imageRefs)),
+        List.of(new ChatRequest.Message(
+            ChatRequest.Role.user,
+            "What is in this image?",
+            imageRefs)),
         "gpt-4",
         null, null, null, null, null, null, null, null,
         false,
         null, null, null, null
     );
-    WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
+    WebsocketRequest request = new WebsocketRequest(
+        1L,
+        "POST",
+        "/v1/chat/completions",
+        Optional.of(mapper.writeValueAsString(chatRequest)));
 
     ChatCompletion mockCompletion = mock(ChatCompletion.class);
     ChatCompletion.Choice mockChoice = mock(ChatCompletion.Choice.class);
@@ -187,7 +308,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("It's a cat"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
     when(config.getServerPort()).thenReturn(8080);
 
     org.mockito.ArgumentCaptor<ChatCompletionCreateParams> captor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -207,19 +327,26 @@ class OpenAIWebsocketHandlerTest {
     assertTrue(content.isArrayOfContentParts(), "Should be multipart content");
 
     var parts = content.asArrayOfContentParts();
-    assertEquals(2, parts.size(), "Should have text + image parts");
+    assertEquals(3, parts.size(), "Should have text + persisted image + document crop parts");
     assertTrue(parts.get(0).isText(), "First part should be text");
     assertTrue(parts.get(1).isImageUrl(), "Second part should be image_url");
+    assertTrue(parts.get(2).isImageUrl(), "Third part should be image_url");
 
     String textContent = parts.get(0).asText().text();
     assertEquals("What is in this image?", textContent);
 
     String url = parts.get(1).asImageUrl().imageUrl().url();
     assertTrue(url.startsWith("http://localhost:8080/v1/images?"), "URL should point to localhost image endpoint");
-    assertTrue(url.contains("attachments%2Fphoto.enc"), "URL should contain encoded S3 key");
+    assertTrue(
+        url.contains("opaque-namespace-7Kq%2Fphoto"),
+        "URL should contain encoded opaque S3 key");
     assertTrue(url.contains("ek="), "URL should contain encryption key param");
     assertTrue(url.contains("token="), "URL should contain token param");
     assertTrue(url.contains("type=image%2Fjpeg"), "URL should contain media type param");
+    String generatedImageUrl = parts.get(2).asImageUrl().imageUrl().url();
+    assertTrue(generatedImageUrl.contains("key=temporary-images%2Fcrop"));
+    assertTrue(generatedImageUrl.contains("type=image%2Fpng"));
+    assertTrue(generatedImageUrl.contains("token="));
   }
 
   @Test
@@ -296,13 +423,12 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
     assertTrue(output.contains("\"type\":\"token\""));
@@ -342,7 +468,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("response"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     handler.handle(request, streamRegistry);
 
@@ -382,7 +507,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("response"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     handler.handle(request, streamRegistry);
 
@@ -422,7 +546,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("{}"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     handler.handle(request, streamRegistry);
 
@@ -467,7 +590,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("response"));
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     handler.handle(request, streamRegistry);
 
@@ -507,7 +629,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.empty());
-    when(toolRegistry.getAllTools()).thenReturn(java.util.Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
 
@@ -549,7 +670,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("print('hello')"));
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
 
@@ -595,7 +715,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("Here are the results"));
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
 
@@ -643,7 +762,6 @@ class OpenAIWebsocketHandlerTest {
     when(mockCompletion.choices()).thenReturn(List.of(mockChoice));
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("Based on the search results..."));
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
 
@@ -714,7 +832,7 @@ class OpenAIWebsocketHandlerTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  void handle_streamingWithToolCall_executesToolAndContinues() throws Exception {
+  void handle_streamingWithToolCall_forwardsResultAndAttachments() throws Exception {
     ChatRequest chatRequest = new ChatRequest(
         List.of(new ChatRequest.Message(ChatRequest.Role.user, "Search for cats", null)),
         "gpt-4",
@@ -778,30 +896,155 @@ class OpenAIWebsocketHandlerTest {
     Tool mockTool = mock(Tool.class);
     FunctionDefinition funcDef = FunctionDefinition.builder().name("web_search").build();
     when(mockTool.getFunctionDefinition()).thenReturn(funcDef);
-    when(mockTool.execute(anyString(), anyString(), any(OutputStream.class))).thenReturn("Search results for cats");
-    when(mockTool.getClientResult(anyString())).thenReturn("Search results for cats");
+    when(mockTool.execute(anyString(), any(ToolExecutionContext.class)))
+        .thenReturn(new ToolResult(
+            "Full search results for cats",
+            "Search complete",
+            List.of(new ToolImageAttachment(new ImageReference(
+                "temporary-images/image-1",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "image/png")))));
 
-    when(toolRegistry.getAllTools()).thenReturn(Map.of("web_search", mockTool));
-    when(toolRegistry.getTool("web_search")).thenReturn(Optional.of(mockTool));
+    useServerTools(Map.of("web_search", mockTool));
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
 
     // Verify tool was called
-    verify(mockTool).execute(eq("{\"query\":\"cats\"}"), eq("call_abc123"), any(OutputStream.class));
+    verify(mockTool).execute(
+        eq("{\"query\":\"cats\"}"),
+        argThat(context -> context.documentSession() == emptyDocumentSession));
+    ArgumentCaptor<ChatCompletionCreateParams> params =
+        ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
+    verify(completionService, times(2)).createStreaming(params.capture());
+    List<ChatCompletionMessageParam> secondRequest = params.getAllValues().get(1).messages();
+    ChatCompletionUserMessageParam imageMessage = secondRequest.getLast().asUser();
+    List<ChatCompletionContentPart> imageParts = imageMessage.content().asArrayOfContentParts();
 
     // Verify output contains tool call, tool response, content, and completion
     assertTrue(output.contains("\"type\":\"tool_call\""));
     assertTrue(output.contains("\"tool_name\":\"web_search\""));
     assertTrue(output.contains("\"type\":\"tool_response\""));
+    assertTrue(output.contains("Search complete"));
+    assertFalse(output.contains("Full search results for cats"));
     assertTrue(output.contains("\"type\":\"token\""));
     assertTrue(output.contains("Cats are great pets!"));
     assertTrue(output.contains("\"type\":\"completion\""));
+    assertEquals(2, imageParts.size());
+    assertEquals(
+        "Images returned by tools for visual verification.",
+        imageParts.getFirst().asText().text());
+    assertTrue(imageParts.getLast().asImageUrl().imageUrl().url().contains(
+        "key=temporary-images%2Fimage-1"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void handle_executesToolCallsInParallelAndPresentsResultsInModelOrder() throws Exception {
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Search both sources", null)),
+        "gpt-4",
+        null, null, null, null, null, null, null, null,
+        true,
+        null, null, null, null);
+    WebsocketRequest request = new WebsocketRequest(
+        1L,
+        "POST",
+        "/v1/chat/completions",
+        Optional.of(mapper.writeValueAsString(chatRequest)));
+    ChatCompletionChunk toolCallChunk = mockChunk();
+    ChatCompletionChunk.Choice toolCallChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta toolCallDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall firstCall = mock(
+        ChatCompletionChunk.Choice.Delta.ToolCall.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall.Function firstFunction = mock(
+        ChatCompletionChunk.Choice.Delta.ToolCall.Function.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall secondCall = mock(
+        ChatCompletionChunk.Choice.Delta.ToolCall.class);
+    ChatCompletionChunk.Choice.Delta.ToolCall.Function secondFunction = mock(
+        ChatCompletionChunk.Choice.Delta.ToolCall.Function.class);
+
+    when(toolCallChunk.choices()).thenReturn(List.of(toolCallChoice));
+    when(toolCallChoice.delta()).thenReturn(toolCallDelta);
+    when(toolCallChoice.finishReason()).thenReturn(Optional.of(
+        ChatCompletionChunk.Choice.FinishReason.TOOL_CALLS));
+    when(toolCallDelta.toolCalls()).thenReturn(Optional.of(List.of(firstCall, secondCall)));
+    when(firstCall.index()).thenReturn(0L);
+    when(firstCall.id()).thenReturn(Optional.of("call_1"));
+    when(firstCall.function()).thenReturn(Optional.of(firstFunction));
+    when(firstFunction.name()).thenReturn(Optional.of("first_tool"));
+    when(firstFunction.arguments()).thenReturn(Optional.of("{}"));
+    when(secondCall.index()).thenReturn(1L);
+    when(secondCall.id()).thenReturn(Optional.of("call_2"));
+    when(secondCall.function()).thenReturn(Optional.of(secondFunction));
+    when(secondFunction.name()).thenReturn(Optional.of("second_tool"));
+    when(secondFunction.arguments()).thenReturn(Optional.of("{}"));
+
+    StreamResponse<ChatCompletionChunk> firstResponse = mock(StreamResponse.class);
+    when(firstResponse.stream()).thenReturn(Stream.of(toolCallChunk));
+
+    ChatCompletionChunk answerChunk = mockChunk();
+    ChatCompletionChunk.Choice answerChoice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta answerDelta = mock(ChatCompletionChunk.Choice.Delta.class);
+    when(answerChunk.choices()).thenReturn(List.of(answerChoice));
+    when(answerChoice.delta()).thenReturn(answerDelta);
+    when(answerChoice.finishReason()).thenReturn(Optional.of(
+        ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(answerDelta.content()).thenReturn(Optional.of("Combined answer"));
+    when(answerDelta.toolCalls()).thenReturn(Optional.empty());
+
+    StreamResponse<ChatCompletionChunk> secondResponse = mock(StreamResponse.class);
+    when(secondResponse.stream()).thenReturn(Stream.of(answerChunk));
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(firstResponse)
+        .thenReturn(secondResponse);
+
+    Tool firstTool = mock(Tool.class);
+    Tool secondTool = mock(Tool.class);
+    when(firstTool.getFunctionDefinition()).thenReturn(
+        FunctionDefinition.builder().name("first_tool").build());
+    when(secondTool.getFunctionDefinition()).thenReturn(
+        FunctionDefinition.builder().name("second_tool").build());
+    AtomicInteger active = new AtomicInteger();
+    AtomicInteger maximum = new AtomicInteger();
+    CountDownLatch bothStarted = new CountDownLatch(2);
+    when(firstTool.execute(anyString(), any(ToolExecutionContext.class)))
+        .thenAnswer(invocation -> parallelToolResult(
+            "result-1",
+            active,
+            maximum,
+            bothStarted));
+    when(secondTool.execute(anyString(), any(ToolExecutionContext.class)))
+        .thenAnswer(invocation -> parallelToolResult(
+            "result-2",
+            active,
+            maximum,
+            bothStarted));
+    useServerTools(Map.of(
+        "first_tool", firstTool,
+        "second_tool", secondTool));
+
+    WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
+    WebsocketHandlerResponse.StreamingResponse streaming =
+        (WebsocketHandlerResponse.StreamingResponse) response;
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    writeStreamingResponse(streaming, output);
+
+    String messages = output.toString();
+    int firstResult  = messages.indexOf("\"content\":\"result-1\"");
+    int secondResult = messages.indexOf("\"content\":\"result-2\"");
+    assertEquals(2, maximum.get());
+    assertTrue(firstResult >= 0);
+    assertTrue(secondResult > firstResult);
+    verify(firstTool).execute(eq("{}"), any(ToolExecutionContext.class));
+    verify(secondTool).execute(eq("{}"), any(ToolExecutionContext.class));
   }
 
   @Test
@@ -866,14 +1109,11 @@ class OpenAIWebsocketHandlerTest {
         .thenReturn(firstStreamResponse)
         .thenReturn(secondStreamResponse);
 
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
-    when(toolRegistry.getTool("unknown_tool")).thenReturn(Optional.empty());
-
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
 
@@ -925,13 +1165,12 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
     assertTrue(output.contains("\"content\":\"Hello!\""));
@@ -988,13 +1227,12 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
     // Should only have "Hi", not empty content
@@ -1071,17 +1309,16 @@ class OpenAIWebsocketHandlerTest {
     Tool mockTool = mock(Tool.class);
     FunctionDefinition funcDef = FunctionDefinition.builder().name("web_search").build();
     when(mockTool.getFunctionDefinition()).thenReturn(funcDef);
-    when(mockTool.execute(anyString(), anyString(), any(OutputStream.class))).thenReturn("Search results");
-    when(mockTool.getClientResult(anyString())).thenReturn("Search results");
+    when(mockTool.execute(anyString(), any(ToolExecutionContext.class)))
+        .thenReturn(ToolResult.text("Search results"));
 
-    when(toolRegistry.getAllTools()).thenReturn(Map.of("web_search", mockTool));
-    when(toolRegistry.getTool("web_search")).thenReturn(Optional.of(mockTool));
+    useServerTools(Map.of("web_search", mockTool));
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     // Capture the params from both calls
     var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -1176,17 +1413,16 @@ class OpenAIWebsocketHandlerTest {
     Tool mockTool = mock(Tool.class);
     FunctionDefinition funcDef = FunctionDefinition.builder().name("web_search").build();
     when(mockTool.getFunctionDefinition()).thenReturn(funcDef);
-    when(mockTool.execute(anyString(), anyString(), any(OutputStream.class))).thenReturn("Search results");
-    when(mockTool.getClientResult(anyString())).thenReturn("Search results");
+    when(mockTool.execute(anyString(), any(ToolExecutionContext.class)))
+        .thenReturn(ToolResult.text("Search results"));
 
-    when(toolRegistry.getAllTools()).thenReturn(Map.of("web_search", mockTool));
-    when(toolRegistry.getTool("web_search")).thenReturn(Optional.of(mockTool));
+    useServerTools(Map.of("web_search", mockTool));
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     // Capture all params
     var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -1250,13 +1486,11 @@ class OpenAIWebsocketHandlerTest {
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
         .thenReturn(streamResponse);
 
-    lenient().when(toolRegistry.getAllTools()).thenReturn(Map.of());
-
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     // Capture params
     var paramsCaptor = org.mockito.ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -1325,14 +1559,13 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
     when(config.getMaxContextTokens()).thenReturn(262144);
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
     assertTrue(output.contains("\"context_tokens\":1500"));
@@ -1377,14 +1610,13 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
     when(config.getMaxContextTokens()).thenReturn(262144);
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     String output = outputStream.toString();
     assertTrue(output.contains("\"context_tokens\":0"));
@@ -1429,14 +1661,13 @@ class OpenAIWebsocketHandlerTest {
     when(openAIClient.chat()).thenReturn(chatService);
     when(chatService.completions()).thenReturn(completionService);
     when(completionService.createStreaming(any(ChatCompletionCreateParams.class))).thenReturn(streamResponse);
-    when(toolRegistry.getAllTools()).thenReturn(Map.of());
     when(config.getMaxContextTokens()).thenReturn(262144);
 
     WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
     WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
 
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    streamingResponse.stream().write(outputStream);
+    writeStreamingResponse(streamingResponse, outputStream);
 
     verify(completionService).createStreaming(argThat((ChatCompletionCreateParams params) ->
         params.streamOptions().isPresent() &&
@@ -1446,7 +1677,7 @@ class OpenAIWebsocketHandlerTest {
   }
 
   @Test
-  void handle_withRegisteredTools_addsToolsToParams() throws Exception {
+  void handle_nonStreamingRequestOmitsServerAndClientTools() throws Exception {
     ChatRequest chatRequest = new ChatRequest(
         List.of(new ChatRequest.Message(ChatRequest.Role.user, "Hello", null)),
         "gpt-4",
@@ -1462,7 +1693,10 @@ class OpenAIWebsocketHandlerTest {
         null,
         null,
         null,
-        null
+        List.of(new ChatRequest.ClientTool(
+            "client_tool",
+            "Client-provided tool",
+            Map.of("type", "object")))
     );
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/chat/completions", Optional.of(mapper.writeValueAsString(chatRequest)));
 
@@ -1477,20 +1711,142 @@ class OpenAIWebsocketHandlerTest {
     when(mockChoice.message()).thenReturn(mockMessage);
     when(mockMessage.content()).thenReturn(Optional.of("response"));
 
-    // Mock two tools
     Tool tool1 = mock(Tool.class);
     Tool tool2 = mock(Tool.class);
-    FunctionDefinition funcDef1 = FunctionDefinition.builder().name("tool1").build();
-    FunctionDefinition funcDef2 = FunctionDefinition.builder().name("tool2").build();
-    when(tool1.getFunctionDefinition()).thenReturn(funcDef1);
-    when(tool2.getFunctionDefinition()).thenReturn(funcDef2);
-
-    when(toolRegistry.getAllTools()).thenReturn(Map.of("tool1", tool1, "tool2", tool2));
+    useServerTools(Map.of("tool1", tool1, "tool2", tool2));
 
     handler.handle(request, streamRegistry);
 
     verify(completionService).create(argThat((ChatCompletionCreateParams params) ->
-        params.tools().isPresent() && params.tools().get().size() == 2
+        params.tools().isEmpty() || params.tools().get().isEmpty()
     ));
+    verifyNoInteractions(toolRegistry);
+  }
+
+  @Test
+  void handle_webSearchDisabledSelectsToolsWithoutWebAccess() throws Exception {
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Hello", null)),
+        "gpt-4",
+        null, null, null, null, null, null, null, null,
+        true,
+        null,
+        null,
+        false,
+        null);
+    WebsocketRequest request = new WebsocketRequest(
+        1L,
+        "POST",
+        "/v1/chat/completions",
+        Optional.of(mapper.writeValueAsString(chatRequest)));
+    ChatCompletionChunk contentChunk = mockChunk();
+    ChatCompletionChunk.Choice choice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta delta = mock(ChatCompletionChunk.Choice.Delta.class);
+    StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
+
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(contentChunk.choices()).thenReturn(List.of(choice));
+    when(choice.delta()).thenReturn(delta);
+    when(choice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(delta.content()).thenReturn(Optional.of("response"));
+    when(delta.toolCalls()).thenReturn(Optional.empty());
+    when(streamResponse.stream()).thenReturn(Stream.of(contentChunk));
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(streamResponse);
+
+    WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
+    WebsocketHandlerResponse.StreamingResponse streaming =
+        (WebsocketHandlerResponse.StreamingResponse) response;
+    writeStreamingResponse(streaming, new ByteArrayOutputStream());
+
+    verify(toolRegistry).forRequest(
+        argThat(eligibility -> !eligibility.satisfies(Set.of(ToolRequirement.WEB_ACCESS))));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void handle_withDocumentsSelectsRegisteredFileTools() throws Exception {
+    DocumentToolSessionFactory documentToolSessions = mock(DocumentToolSessionFactory.class);
+    DocumentToolSession documentSession = mock(DocumentToolSession.class);
+    Tool fileSearch = mock(Tool.class);
+    FunctionDefinition function = FunctionDefinition.builder().name("file_search").build();
+    DocumentReference reference = new DocumentReference(
+        "document-1",
+        "Jung.pdf",
+        "application/pdf",
+        100,
+        "opaque-namespace-7Kq/document-1",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+    ChatRequest chatRequest = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Summarize section 12", null)),
+        "gpt-4",
+        null, null, null, null, null, null, null, null,
+        true,
+        null, null, null, null,
+        List.of(reference));
+    WebsocketRequest request = new WebsocketRequest(
+        1L,
+        "POST",
+        "/v1/chat/completions",
+        Optional.of(mapper.writeValueAsString(chatRequest)));
+    ChatCompletionChunk contentChunk = mockChunk();
+    ChatCompletionChunk.Choice choice = mock(ChatCompletionChunk.Choice.class);
+    ChatCompletionChunk.Choice.Delta delta = mock(ChatCompletionChunk.Choice.Delta.class);
+    StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
+
+    when(documentToolSessions.open(List.of(reference))).thenReturn(documentSession);
+    when(fileSearch.getFunctionDefinition()).thenReturn(function);
+    useServerTools(Map.of("file_search", fileSearch));
+    when(openAIClient.chat()).thenReturn(chatService);
+    when(chatService.completions()).thenReturn(completionService);
+    when(contentChunk.choices()).thenReturn(List.of(choice));
+    when(choice.delta()).thenReturn(delta);
+    when(choice.finishReason()).thenReturn(Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP));
+    when(delta.content()).thenReturn(Optional.of("Summary"));
+    when(delta.toolCalls()).thenReturn(Optional.empty());
+    when(streamResponse.stream()).thenReturn(Stream.of(contentChunk));
+    when(completionService.createStreaming(any(ChatCompletionCreateParams.class)))
+        .thenReturn(streamResponse);
+    handler = new OpenAIWebsocketHandler(
+        openAIClient,
+        mapper,
+        toolRegistry,
+        config,
+        messagePresenter,
+        documentToolSessions,
+        validatorFactory.getValidator());
+
+    WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
+    WebsocketHandlerResponse.StreamingResponse streaming =
+        (WebsocketHandlerResponse.StreamingResponse) response;
+    writeStreamingResponse(streaming, new ByteArrayOutputStream());
+
+    verify(completionService).createStreaming(argThat((ChatCompletionCreateParams params) ->
+        params.tools().isPresent()
+            && params.tools().get().size() == 1));
+    verify(toolRegistry).forRequest(
+        argThat(eligibility -> eligibility.satisfies(Set.of(ToolRequirement.DOCUMENTS))));
+  }
+
+  private static ToolResult parallelToolResult(String content,
+                                               AtomicInteger active,
+                                               AtomicInteger maximum,
+                                               CountDownLatch bothStarted)
+  {
+    int activeNow = active.incrementAndGet();
+    maximum.accumulateAndGet(activeNow, Math::max);
+    bothStarted.countDown();
+
+    try {
+      if (!bothStarted.await(2, TimeUnit.SECONDS)) {
+        throw new IllegalStateException("Tool calls did not execute in parallel");
+      }
+      return ToolResult.text(content);
+    } catch (InterruptedException error) {
+      throw new IllegalStateException("Interrupted while awaiting parallel tool calls", error);
+    } finally {
+      active.decrementAndGet();
+    }
   }
 }

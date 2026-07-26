@@ -1,15 +1,31 @@
 package org.moxie.confer.proxy.controllers;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.validation.Validation;
+import jakarta.validation.ValidatorFactory;
 import jakarta.ws.rs.WebApplicationException;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.config.Config;
+import org.moxie.confer.proxy.documents.DecryptedDocument;
+import org.moxie.confer.proxy.documents.DocumentDerivedStorage;
+import org.moxie.confer.proxy.documents.DocumentNotFoundException;
+import org.moxie.confer.proxy.documents.DocumentStorageGateway;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerConnection;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerGateway;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerInputStream;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerOutputStream;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerPayloadRole;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerTestFrame;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerTestFrameDecoder;
+import org.moxie.confer.proxy.documents.worker.responses.DocumentExtractionMetadata;
+import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponse;
+import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponsePayload;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
-import org.moxie.confer.proxy.services.DoclingHttpClient;
 import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
@@ -18,509 +34,599 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Field;
-import java.net.http.HttpHeaders;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@ExtendWith(MockitoExtension.class)
 class DocumentExtractionHandlerTest {
 
-  private static final int CHUNK_SIZE = 32 * 1024; // 32KB chunks
+  private static final int CHUNK_SIZE = 32 * 1024;
 
-  @Mock
-  private DoclingHttpClient doclingClient;
+  private static ValidatorFactory validatorFactory;
 
-  @Mock
-  private Config config;
-
-  private ObjectMapper mapper;
+  private TestDocumentWorkerGateway workerGateway;
+  private RecordingStorage          storage;
+  private TestConfig                config;
+  private ObjectMapper              mapper;
   private DocumentExtractionHandler handler;
-  private StreamRegistry streamRegistry;
+  private StreamRegistry            streamRegistry;
 
-  @BeforeEach
-  void setUp() throws Exception {
-    mapper = new ObjectMapper();
-    streamRegistry = new StreamRegistry();
-
-    handler = new DocumentExtractionHandler();
-
-    setField(handler, "mapper", mapper);
-    setField(handler, "doclingClient", doclingClient);
-    setField(handler, "config", config);
+  @BeforeAll
+  static void createValidatorFactory() {
+    validatorFactory = Validation.buildDefaultValidatorFactory();
   }
 
-  private void setField(Object target, String fieldName, Object value) throws Exception {
-    Field field = target.getClass().getDeclaredField(fieldName);
+  @AfterAll
+  static void closeValidatorFactory() {
+    validatorFactory.close();
+  }
+
+  @BeforeEach
+  void setUp() throws ReflectiveOperationException {
+    workerGateway = new TestDocumentWorkerGateway();
+    storage = new RecordingStorage();
+    config = new TestConfig();
+    mapper = new ObjectMapper();
+    streamRegistry = new StreamRegistry();
+    handler = new DocumentExtractionHandler();
+    setField(handler, "mapper", mapper);
+    setField(handler, "validator", validatorFactory.getValidator());
+    setField(handler, "storage", storage);
+    setField(handler, "derivedStorage", storage);
+    setField(handler, "workers", new DocumentWorkerScheduler(config, workerGateway));
+  }
+
+  @Test
+  void storedExtractionDoesNotAcceptFileData() {
+    WebsocketRequest request = new WebsocketRequest(
+        1,
+        Optional.of("POST"),
+        Optional.of("/v2/document/extract"),
+        storedRequest("test.pdf", "application/pdf", 1).body(),
+        Optional.of(new WebsocketRequest.StreamChunk(new byte[] {1}, true, 0)));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(request, streamRegistry));
+
+    assertEquals(400, error.getResponse().getStatus());
+  }
+
+  @Test
+  void incompleteStoredReferenceReturns400() {
+    WebsocketRequest request = new WebsocketRequest(
+        1,
+        "POST",
+        "/v2/document/extract",
+        Optional.of("""
+            {"filename":"test.pdf","content_type":"application/pdf","total_length":1,
+             "source_object_key":"source/object"}
+            """));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(request, streamRegistry));
+
+    assertEquals(400, error.getResponse().getStatus());
+  }
+
+  @Test
+  void legacyOfficeFormatReturns415() {
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.doc", "application/msword", 1), streamRegistry));
+
+    assertEquals(415, error.getResponse().getStatus());
+  }
+
+  @Test
+  void invalidDocumentMetadataReturns400BeforeExtraction() {
+    assertBadRequest(storedRequest(" ", "application/pdf", 1));
+    assertBadRequest(storedRequest("test.pdf", "application/pdf", 0));
+    assertBadRequest(storedRequest("test.pdf", "application/pdf", 256L * 1024 * 1024 + 1));
+  }
+
+  @Test
+  void readsStoredSourceAndPersistsDerivedObjectsBeforeReturningText() throws Exception {
+    byte[] source = new byte[CHUNK_SIZE * 3 + 17];
+    for (int index = 0; index < source.length; index++) {
+      source[index] = (byte) index;
+    }
+    storage.put("source/object", source);
+    ByteArrayOutputStream requests = new ByteArrayOutputStream();
+    workerGateway.respondWith(connection(successResponse(), requests));
+
+    WebsocketHandlerResponse handlerResponse = handler.handle(
+        storedRequest("test.pdf", "application/pdf", source.length),
+        streamRegistry);
+    WebsocketHandlerResponse.StreamingResponse streaming = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handlerResponse);
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (streaming) {
+      streaming.writeTo(output);
+    }
+
+    DocumentWorkerTestFrame received = decodeRequest(requests);
+    assertArrayEquals(
+        source,
+        received.payloads().get(DocumentWorkerPayloadRole.SOURCE).content());
+    assertEquals("source/object", storage.openedObjectKey());
+    assertEquals(output.size(), Integer.parseInt(streaming.headers().get("Content-Length")));
+    assertEquals(
+        "application/vnd.confer.document-extraction+json",
+        streaming.headers().get("Content-Type"));
+    JsonNode result = mapper.readTree(output.toByteArray());
+    assertEquals(4, result.get("text_length").intValue());
+    assertEquals("text", result.get("markdown").textValue());
+    assertArrayEquals(
+        "artifact".getBytes(StandardCharsets.UTF_8),
+        storage.object("source/object.artifact"));
+    assertArrayEquals(
+        "text".getBytes(StandardCharsets.UTF_8),
+        storage.object("source/object.txt"));
+    assertTrue(storage.receivedBufferedInput("source/object.txt"));
+  }
+
+  @Test
+  void omitsLargeTextFromTheExtractionResponse() throws Exception {
+    byte[] source = new byte[] {1};
+    String text = "x".repeat(256 * 1024 + 1);
+    storage.put("source/object", source);
+    workerGateway.respondWith(connection(
+        successResponse(text),
+        new ByteArrayOutputStream()));
+
+    WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handler.handle(
+            storedRequest("test.pdf", "application/pdf", source.length),
+            streamRegistry));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (response) {
+      response.writeTo(output);
+    }
+
+    JsonNode result = mapper.readTree(output.toByteArray());
+    assertEquals(text.length(), result.get("text_length").intValue());
+    assertFalse(result.has("markdown"));
+    assertArrayEquals(
+        text.getBytes(StandardCharsets.UTF_8),
+        storage.object("source/object.txt"));
+  }
+
+  @Test
+  void usesTheClientInlineTextLimit() throws Exception {
+    byte[] source = new byte[] {1};
+    String text = "x".repeat(256 * 1024 + 1);
+    storage.put("source/object", source);
+    workerGateway.respondWith(connection(
+        successResponse(text),
+        new ByteArrayOutputStream()));
+
+    WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handler.handle(
+            storedRequest("test.pdf", "application/pdf", source.length, text.length()),
+            streamRegistry));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (response) {
+      response.writeTo(output);
+    }
+
+    JsonNode result = mapper.readTree(output.toByteArray());
+    assertEquals(text.length(), result.get("text_length").intValue());
+    assertEquals(text, result.get("markdown").textValue());
+  }
+
+  @Test
+  void zeroClientLimitDisablesInlineText() throws Exception {
+    byte[] source = new byte[] {1};
+    storage.put("source/object", source);
+    workerGateway.respondWith(connection(successResponse(), new ByteArrayOutputStream()));
+
+    WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handler.handle(
+            storedRequest("test.pdf", "application/pdf", source.length, 0),
+            streamRegistry));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (response) {
+      response.writeTo(output);
+    }
+
+    JsonNode result = mapper.readTree(output.toByteArray());
+    assertEquals(4, result.get("text_length").intValue());
+    assertFalse(result.has("markdown"));
+    assertFalse(storage.receivedBufferedInput("source/object.txt"));
+  }
+
+  @Test
+  void negativeClientLimitReturns400BeforeExtraction() {
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(
+            storedRequest("test.pdf", "application/pdf", 1, -1),
+            streamRegistry));
+
+    assertEquals(400, error.getResponse().getStatus());
+  }
+
+  @Test
+  void clientLimitBeyondLongRangeReturns400BeforeExtraction() {
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(
+            storedRequestWithInlineLimit(
+                "test.pdf",
+                "application/pdf",
+                1,
+                "9223372036854775808"),
+            streamRegistry));
+
+    assertEquals(400, error.getResponse().getStatus());
+  }
+
+  @Test
+  void clientLimitBeyondIntegerRangeIsAcceptedAndClamped() throws Exception {
+    byte[] source = new byte[] {1};
+    String text = "x".repeat(300_000);
+    storage.put("source/object", source);
+    workerGateway.respondWith(connection(successResponse(text), new ByteArrayOutputStream()));
+
+    WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handler.handle(
+            storedRequest(
+                "test.pdf",
+                "application/pdf",
+                source.length,
+                2_147_483_648L),
+            streamRegistry));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (response) {
+      response.writeTo(output);
+    }
+
+    assertEquals(text, mapper.readTree(output.toByteArray()).get("markdown").textValue());
+  }
+
+  @Test
+  void reportsJavascriptCharacterLengthAndStreamsValidJson() throws Exception {
+    byte[] source = new byte[] {1};
+    String text = "quote=\" newline=\n café 🩺";
+    storage.put("source/object", source);
+    workerGateway.respondWith(connection(successResponse(text), new ByteArrayOutputStream()));
+
+    WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        handler.handle(
+            storedRequest("test.pdf", "application/pdf", source.length),
+            streamRegistry));
+    ByteArrayOutputStream output = new ByteArrayOutputStream();
+    try (response) {
+      response.writeTo(output);
+    }
+
+    JsonNode result = mapper.readTree(output.toByteArray());
+    assertEquals(text.length(), result.get("text_length").longValue());
+    assertEquals(text, result.get("markdown").textValue());
+    assertEquals(output.size(), Long.parseLong(response.headers().get("Content-Length")));
+  }
+
+  @Test
+  void modernOfficeFormatIsSentToWorker() throws Exception {
+    storage.put("source/object", new byte[] {1});
+    ByteArrayOutputStream requests = new ByteArrayOutputStream();
+    workerGateway.respondWith(connection(successResponse(), requests));
+
+    WebsocketHandlerResponse response = handler.handle(
+        storedRequest(
+            "test.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            1),
+        streamRegistry);
+
+    WebsocketHandlerResponse.StreamingResponse streaming = assertInstanceOf(
+        WebsocketHandlerResponse.StreamingResponse.class,
+        response);
+    try (streaming) {
+      streaming.writeTo(new ByteArrayOutputStream());
+    }
+    DocumentWorkerTestFrame received = decodeRequest(requests);
+
+    assertEquals("extract", received.header().get("operation"));
+    assertEquals("test.docx", received.header().get("filename"));
+    assertEquals(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        received.header().get("content_type"));
+  }
+
+  @Test
+  void sourceLengthMismatchReturns422AndReleasesWorker() throws Exception {
+    storage.put("source/object", new byte[] {1, 2});
+    workerGateway.respondWith(connection(successResponse(), new ByteArrayOutputStream()));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.pdf", "application/pdf", 1), streamRegistry));
+
+    assertEquals(422, error.getResponse().getStatus());
+  }
+
+  @Test
+  void missingStoredSourceReturns422() throws Exception {
+    workerGateway.respondWith(connection(successResponse(), new ByteArrayOutputStream()));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.pdf", "application/pdf", 1), streamRegistry));
+
+    assertEquals(422, error.getResponse().getStatus());
+  }
+
+  @Test
+  void workerRejectionReturns422() throws Exception {
+    storage.put("source/object", new byte[] {1});
+    workerGateway.respondWith(connection(
+        DocumentWorkerResponse.failure("invalid_request", "Invalid request"),
+        new ByteArrayOutputStream()));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.pdf", "application/pdf", 1), streamRegistry));
+
+    assertEquals(422, error.getResponse().getStatus());
+  }
+
+  @Test
+  void workerIoFailureReturns502() {
+    storage.put("source/object", new byte[] {1});
+    workerGateway.failWith(new IOException("socket unavailable"));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.pdf", "application/pdf", 1), streamRegistry));
+
+    assertEquals(502, error.getResponse().getStatus());
+  }
+
+  @Test
+  void leavesValidArtifactForAConcurrentRetryWhenTextPersistenceFails() throws Exception {
+    storage.put("source/object", new byte[] {1});
+    storage.failStore("source/object.txt");
+    workerGateway.respondWith(connection(successResponse(), new ByteArrayOutputStream()));
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(storedRequest("test.pdf", "application/pdf", 1), streamRegistry));
+
+    assertEquals(502, error.getResponse().getStatus());
+    assertArrayEquals(
+        "artifact".getBytes(StandardCharsets.UTF_8),
+        storage.object("source/object.artifact"));
+  }
+
+  private WebsocketRequest storedRequest(String filename,
+                                         String contentType,
+                                         long totalLength)
+  {
+    return storedRequest(filename, contentType, totalLength, null);
+  }
+
+  private WebsocketRequest storedRequest(String filename,
+                                         String contentType,
+                                         long totalLength,
+                                         Number inlineTextMaxCharacters)
+  {
+    return storedRequestWithInlineLimit(
+        filename,
+        contentType,
+        totalLength,
+        inlineTextMaxCharacters == null ? null : inlineTextMaxCharacters.toString());
+  }
+
+  private WebsocketRequest storedRequestWithInlineLimit(String filename,
+                                                        String contentType,
+                                                        long totalLength,
+                                                        String inlineTextMaxCharacters)
+  {
+    String body = "{\"filename\":\"" + filename
+        + "\",\"content_type\":\"" + contentType
+        + "\",\"total_length\":" + totalLength
+        + ",\"source_object_key\":\"source/object\""
+        + ",\"encryption_key\":\"key\""
+        + (inlineTextMaxCharacters == null
+            ? ""
+            : ",\"inline_text_max_characters\":" + inlineTextMaxCharacters)
+        + "}";
+    return new WebsocketRequest(
+        1,
+        "POST",
+        "/v2/document/extract",
+        Optional.of(body));
+  }
+
+  private void assertBadRequest(WebsocketRequest request) {
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> handler.handle(request, streamRegistry));
+
+    assertEquals(400, error.getResponse().getStatus());
+  }
+
+  private static DocumentWorkerResponse<DocumentExtractionMetadata> successResponse() {
+    return successResponse("text");
+  }
+
+  private static DocumentWorkerResponse<DocumentExtractionMetadata> successResponse(String text) {
+    byte[] textBytes = text.getBytes(StandardCharsets.UTF_8);
+    Map<DocumentWorkerPayloadRole, DocumentWorkerResponsePayload> payloads = new LinkedHashMap<>();
+    payloads.put(
+        DocumentWorkerPayloadRole.ARTIFACT,
+        new DocumentWorkerResponsePayload(
+            DocumentWorkerPayloadRole.ARTIFACT.requiredMediaType(),
+            "artifact".getBytes(StandardCharsets.UTF_8)));
+    payloads.put(
+        DocumentWorkerPayloadRole.TEXT,
+        new DocumentWorkerResponsePayload(
+            DocumentWorkerPayloadRole.TEXT.requiredMediaType(),
+            textBytes));
+    return DocumentWorkerResponse.success(
+        new DocumentExtractionMetadata(
+            (long) textBytes.length,
+            (long) text.length(),
+            jsonEscapedTextBytes(textBytes)),
+        payloads);
+  }
+
+  private static long jsonEscapedTextBytes(byte[] text) {
+    long escaped = text.length;
+    for (byte value : text) {
+      int character = Byte.toUnsignedInt(value);
+      if (character == 0x08
+          || character == 0x09
+          || character == 0x0a
+          || character == 0x0c
+          || character == 0x0d
+          || character == 0x22
+          || character == 0x5c)
+      {
+        escaped++;
+      } else if (character < 0x20) {
+        escaped += 5;
+      }
+    }
+    return escaped;
+  }
+
+  private DocumentWorkerConnection connection(DocumentWorkerResponse<?> response,
+                                              ByteArrayOutputStream requests)
+    throws IOException
+  {
+    ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+    new DocumentWorkerOutputStream(mapper, encoded).writeResponse(response);
+    return new DocumentWorkerConnection(
+        new DocumentWorkerInputStream(mapper, new ByteArrayInputStream(encoded.toByteArray())),
+        new DocumentWorkerOutputStream(mapper, requests),
+        (objectKey, encryptionKey) -> {
+          throw new AssertionError("Extraction connection must not reopen document storage");
+        },
+        mapper,
+        validatorFactory.getValidator());
+  }
+
+  private DocumentWorkerTestFrame decodeRequest(ByteArrayOutputStream requests) throws IOException {
+    return new DocumentWorkerTestFrameDecoder(
+        mapper,
+        new ByteArrayInputStream(requests.toByteArray())).read();
+  }
+
+  private static void setField(Object target, String name, Object value)
+    throws ReflectiveOperationException
+  {
+    Field field = target.getClass().getDeclaredField(name);
     field.setAccessible(true);
     field.set(target, value);
   }
 
-  @SuppressWarnings("unchecked")
-  private HttpResponse<InputStream> mockDoclingResponse(int statusCode, String body) {
-    HttpResponse<InputStream> response = mock(HttpResponse.class);
-    when(response.statusCode()).thenReturn(statusCode);
-    // Only stub body and headers for successful responses (error paths close response body)
-    if (statusCode == 200) {
-      when(response.body()).thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
-      when(response.headers()).thenReturn(HttpHeaders.of(
-          Map.of("Content-Length", List.of(String.valueOf(body.length())),
-                 "Content-Type", List.of("application/json")),
-          (a, b) -> true
-      ));
-    } else {
-      // Error paths close the response body
-      when(response.body()).thenReturn(new ByteArrayInputStream(new byte[0]));
-    }
-    return response;
-  }
+  private static class TestConfig extends Config {
 
-  /**
-   * Makes the mock doclingClient drain the InputStream argument (first arg)
-   * on a virtual thread before returning the response future. This simulates
-   * sendAsync reading the request body from the pipe, preventing the pipe
-   * buffer from filling up and blocking writers.
-   */
-  private void mockConvertFileDraining(HttpResponse<InputStream> response) throws Exception {
-    when(doclingClient.convertFile(any(InputStream.class), anyString(), anyString(), any()))
-        .thenAnswer(invocation -> {
-          InputStream input = invocation.getArgument(0);
-          Thread.startVirtualThread(() -> {
-            try { input.readAllBytes(); } catch (IOException ignored) {}
-          });
-          return CompletableFuture.completedFuture(response);
-        });
-  }
-
-  /**
-   * Helper to run handler with chunked data on separate threads.
-   */
-  private WebsocketHandlerResponse runHandlerWithChunks(
-      String filename, String contentType, byte[] data) throws Exception {
-
-    int numChunks = (data.length + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    byte[][] chunks = new byte[numChunks][];
-    for (int i = 0; i < numChunks; i++) {
-      int start = i * CHUNK_SIZE;
-      int end = Math.min(start + CHUNK_SIZE, data.length);
-      chunks[i] = new byte[end - start];
-      System.arraycopy(data, start, chunks[i], 0, end - start);
+    @Override
+    public int getDocumentWorkerMaxConnections() {
+      return 8;
     }
 
-    String body;
-    if (contentType != null) {
-      body = String.format("{\"filename\": \"%s\", \"content_type\": \"%s\"}", filename, contentType);
-    } else {
-      body = String.format("{\"filename\": \"%s\"}", filename);
+    @Override
+    public long getDocumentWorkerAcquireTimeoutSeconds() {
+      return 1;
     }
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of(body),
-        Optional.of(new WebsocketRequest.StreamChunk(chunks[0], numChunks == 1, 0))
-    );
+  }
 
-    // Run handler on background thread
-    CompletableFuture<WebsocketHandlerResponse> handlerFuture =
-        CompletableFuture.supplyAsync(() -> handler.handle(request, streamRegistry));
+  private static class RecordingStorage implements DocumentStorageGateway, DocumentDerivedStorage {
 
-    // Give handler time to set up pipe
-    Thread.sleep(10);
+    private final Map<String, byte[]> objects = new LinkedHashMap<>();
+    private final Map<String, Boolean> bufferedInputs = new LinkedHashMap<>();
 
-    // Write remaining chunks
-    for (int i = 1; i < numChunks; i++) {
-      streamRegistry.handleChunk(1L, chunks[i], i, i == numChunks - 1);
+    private String openedObjectKey;
+    private String failedStoreObjectKey;
+
+    @Override
+    public DecryptedDocument open(String objectKey, String encryptionKey) throws IOException {
+      openedObjectKey = objectKey;
+      byte[] value = objects.get(objectKey);
+      if (value == null) {
+        throw new DocumentNotFoundException();
+      }
+      return new DecryptedDocument(new ByteArrayInputStream(value), value.length);
     }
 
-    return handlerFuture.get(10, TimeUnit.SECONDS);
-  }
-
-  @Test
-  void handle_doclingDisabled_throws503() {
-    when(config.isDoclingEnabled()).thenReturn(false);
-
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of("{\"filename\": \"test.pdf\", \"content_type\": \"application/pdf\"}"),
-        Optional.of(new WebsocketRequest.StreamChunk("data".getBytes(), true, 0))
-    );
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(503, exception.getResponse().getStatus());
-  }
-
-  @Test
-  void handle_missingChunk_throws400() {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/document/extract",
-        Optional.of("{\"filename\": \"test.pdf\"}"));
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(400, exception.getResponse().getStatus());
-    assertTrue(exception.getMessage().contains("Streaming required"));
-  }
-
-  @Test
-  void handle_missingBody_throws400() {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.empty(),
-        Optional.of(new WebsocketRequest.StreamChunk("data".getBytes(), true, 0))
-    );
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(400, exception.getResponse().getStatus());
-    assertTrue(exception.getMessage().contains("Request body"));
-  }
-
-  @Test
-  void handle_invalidJson_throws400() {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of("not valid json"),
-        Optional.of(new WebsocketRequest.StreamChunk("data".getBytes(), true, 0))
-    );
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(400, exception.getResponse().getStatus());
-    assertTrue(exception.getMessage().contains("Invalid request body"));
-  }
-
-  @Test
-  void handle_missingFilename_throws400() {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of("{\"content_type\": \"application/pdf\"}"),
-        Optional.of(new WebsocketRequest.StreamChunk("data".getBytes(), true, 0))
-    );
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(400, exception.getResponse().getStatus());
-    assertTrue(exception.getMessage().contains("filename is required"));
-  }
-
-  @Test
-  void handle_blankFilename_throws400() {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of("{\"filename\": \"   \"}"),
-        Optional.of(new WebsocketRequest.StreamChunk("data".getBytes(), true, 0))
-    );
-
-    WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
-
-    assertEquals(400, exception.getResponse().getStatus());
-    assertTrue(exception.getMessage().contains("filename is required"));
-  }
-
-  @Test
-  void handle_successfulExtraction_streamsDoclingResponse() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"# Extracted Content\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-    mockConvertFileDraining(mockResponse);
-
-    WebsocketHandlerResponse response = runHandlerWithChunks("test.pdf", "application/pdf", "PDF content".getBytes());
-
-    assertInstanceOf(WebsocketHandlerResponse.StreamingResponse.class, response);
-
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    String jsonOutput = output.toString(StandardCharsets.UTF_8);
-    assertTrue(jsonOutput.contains("Extracted Content"));
-  }
-
-  @Test
-  void handle_successfulExtraction_includesContentLengthHeader() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"# Test\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-    mockConvertFileDraining(mockResponse);
-
-    WebsocketHandlerResponse response = runHandlerWithChunks("test.pdf", "application/pdf", "PDF content".getBytes());
-
-    assertInstanceOf(WebsocketHandlerResponse.StreamingResponse.class, response);
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-
-    String contentLength = streamingResponse.headers().get("Content-Length");
-    assertNotNull(contentLength, "Content-Length header must be present");
-
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    assertEquals(Integer.parseInt(contentLength), output.size(),
-        "Content-Length header must match actual response body size");
-  }
-
-  @Test
-  void handle_doclingReturnsError_throwsWithStatusCode() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(500, "Internal error");
-    mockConvertFileDraining(mockResponse);
-
-    java.util.concurrent.ExecutionException execException = assertThrows(
-        java.util.concurrent.ExecutionException.class,
-        () -> runHandlerWithChunks("test.pdf", "application/pdf", "PDF content".getBytes()));
-
-    assertInstanceOf(WebApplicationException.class, execException.getCause());
-    WebApplicationException exception = (WebApplicationException) execException.getCause();
-    assertEquals(500, exception.getResponse().getStatus());
-  }
-
-  @Test
-  void handle_doclingThrowsIOException_throwsError() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    when(doclingClient.convertFile(any(InputStream.class), anyString(), anyString(), any()))
-        .thenAnswer(invocation -> {
-          InputStream input = invocation.getArgument(0);
-          Thread.startVirtualThread(() -> {
-            try { input.readAllBytes(); } catch (IOException ignored) {}
-          });
-          return CompletableFuture.failedFuture(new IOException("Connection refused"));
-        });
-
-    java.util.concurrent.ExecutionException execException = assertThrows(
-        java.util.concurrent.ExecutionException.class,
-        () -> runHandlerWithChunks("test.pdf", "application/pdf", "PDF content".getBytes()));
-
-    assertInstanceOf(WebApplicationException.class, execException.getCause());
-    WebApplicationException exception = (WebApplicationException) execException.getCause();
-    int status = exception.getResponse().getStatus();
-    // 502 if the chunk write succeeds and responseFuture.get() throws ExecutionException,
-    // 500 if the pipe closes first (from whenComplete) and the chunk write fails
-    assertTrue(status == 500 || status == 502,
-        "Expected 500 or 502 but got " + status);
-  }
-
-  @Test
-  void handle_httpFailureDuringLargeChunkWrite_doesNotDeadlock() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    // Return a future that fails after a delay — simulates the HTTP client
-    // failing after sendAsync has started but before the pipe is fully drained.
-    // Without the whenComplete error handler, the chunk write would block
-    // forever on a full pipe buffer with no reader.
-    when(doclingClient.convertFile(any(InputStream.class), anyString(), anyString(), any()))
-        .thenAnswer(invocation -> {
-          CompletableFuture<HttpResponse<InputStream>> future = new CompletableFuture<>();
-          Thread.startVirtualThread(() -> {
-            try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-            future.completeExceptionally(new IOException("Connection reset"));
-          });
-          return future;
-        });
-
-    // Use data larger than the NIO pipe buffer (~64KB) in a single chunk
-    // so the first chunk write blocks inside handle()
-    byte[] largeChunk = new byte[256 * 1024];
-    String body = "{\"filename\": \"large.pdf\", \"content_type\": \"application/pdf\"}";
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of(body),
-        Optional.of(new WebsocketRequest.StreamChunk(largeChunk, true, 0))
-    );
-
-    // handler.handle() must complete (with an exception) within the timeout,
-    // not deadlock on the blocked pipe write
-    CompletableFuture<WebsocketHandlerResponse> handlerFuture =
-        CompletableFuture.supplyAsync(() -> handler.handle(request, streamRegistry));
-
-    assertThrows(java.util.concurrent.ExecutionException.class,
-        () -> handlerFuture.get(5, TimeUnit.SECONDS));
-  }
-
-  @Test
-  void handle_defaultContentType_usesOctetStream() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"content\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-    mockConvertFileDraining(mockResponse);
-
-    WebsocketHandlerResponse response = runHandlerWithChunks("test.bin", null, "binary data".getBytes());
-
-    // Consume response to avoid resource leak
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    verify(doclingClient).convertFile(any(InputStream.class), eq("test.bin"), eq("application/octet-stream"), any());
-  }
-
-  @Test
-  void handle_multipleChunks_assemblesCorrectly() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"extracted\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-    mockConvertFileDraining(mockResponse);
-
-    byte[] largeData = new byte[CHUNK_SIZE * 3];
-    for (int i = 0; i < largeData.length; i++) {
-      largeData[i] = (byte) (i % 256);
+    @Override
+    public void store(String objectKey,
+                      String encryptionKey,
+                      InputStream content)
+      throws IOException
+    {
+      if (objectKey.equals(failedStoreObjectKey)) {
+        throw new IOException("storage failure");
+      }
+      bufferedInputs.put(objectKey, content instanceof ByteArrayInputStream);
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      content.transferTo(output);
+      objects.put(objectKey, output.toByteArray());
     }
 
-    WebsocketHandlerResponse response = runHandlerWithChunks("large.pdf", "application/pdf", largeData);
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    String jsonOutput = output.toString(StandardCharsets.UTF_8);
-    assertTrue(jsonOutput.contains("extracted"));
-  }
-
-  @Test
-  void handle_ocrOption_passedToDocling() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"ocr result\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-
-    org.mockito.ArgumentCaptor<DoclingHttpClient.ConvertOptions> optionsCaptor =
-        org.mockito.ArgumentCaptor.forClass(DoclingHttpClient.ConvertOptions.class);
-    when(doclingClient.convertFile(any(InputStream.class), anyString(), anyString(), optionsCaptor.capture()))
-        .thenAnswer(invocation -> {
-          InputStream input = invocation.getArgument(0);
-          Thread.startVirtualThread(() -> {
-            try { input.readAllBytes(); } catch (IOException ignored) {}
-          });
-          return CompletableFuture.completedFuture(mockResponse);
-        });
-
-    String body = "{\"filename\": \"scan.pdf\", \"content_type\": \"application/pdf\", \"ocr\": true}";
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of(body),
-        Optional.of(new WebsocketRequest.StreamChunk("scanned content".getBytes(), true, 0))
-    );
-
-    CompletableFuture<WebsocketHandlerResponse> handlerFuture =
-        CompletableFuture.supplyAsync(() -> handler.handle(request, streamRegistry));
-
-    WebsocketHandlerResponse response = handlerFuture.get(10, TimeUnit.SECONDS);
-
-    // Consume response to avoid resource leak
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    DoclingHttpClient.ConvertOptions capturedOptions = optionsCaptor.getValue();
-    assertEquals(true, capturedOptions.ocr());
-  }
-
-  @Test
-  void handle_tableStructureOption_passedToDocling() throws Exception {
-    when(config.isDoclingEnabled()).thenReturn(true);
-
-    String doclingJson = "{\"document\":{\"md_content\":\"table content\"}}";
-    HttpResponse<InputStream> mockResponse = mockDoclingResponse(200, doclingJson);
-
-    org.mockito.ArgumentCaptor<DoclingHttpClient.ConvertOptions> optionsCaptor =
-        org.mockito.ArgumentCaptor.forClass(DoclingHttpClient.ConvertOptions.class);
-    when(doclingClient.convertFile(any(InputStream.class), anyString(), anyString(), optionsCaptor.capture()))
-        .thenAnswer(invocation -> {
-          InputStream input = invocation.getArgument(0);
-          Thread.startVirtualThread(() -> {
-            try { input.readAllBytes(); } catch (IOException ignored) {}
-          });
-          return CompletableFuture.completedFuture(mockResponse);
-        });
-
-    String body = "{\"filename\": \"doc.pdf\", \"content_type\": \"application/pdf\", \"table_structure\": true}";
-    WebsocketRequest request = new WebsocketRequest(
-        1L,
-        Optional.of("POST"),
-        Optional.of("/v1/document/extract"),
-        Optional.of(body),
-        Optional.of(new WebsocketRequest.StreamChunk("content".getBytes(), true, 0))
-    );
-
-    CompletableFuture<WebsocketHandlerResponse> handlerFuture =
-        CompletableFuture.supplyAsync(() -> handler.handle(request, streamRegistry));
-
-    WebsocketHandlerResponse response = handlerFuture.get(10, TimeUnit.SECONDS);
-
-    // Consume response to avoid resource leak
-    WebsocketHandlerResponse.StreamingResponse streamingResponse = (WebsocketHandlerResponse.StreamingResponse) response;
-    ByteArrayOutputStream output = new ByteArrayOutputStream();
-    streamingResponse.stream().write(output);
-
-    DoclingHttpClient.ConvertOptions capturedOptions = optionsCaptor.getValue();
-    assertEquals(true, capturedOptions.tableStructure());
-  }
-
-  @Test
-  void handle_tooManyPendingChunksPerStream_throwsError() throws Exception {
-    for (int i = 0; i < 256; i++) {
-      streamRegistry.handleChunk(999L, ("chunk" + i).getBytes(), i, false);
+    private void put(String objectKey, byte[] value) {
+      objects.put(objectKey, value);
     }
 
-    assertThrows(IOException.class, () ->
-        streamRegistry.handleChunk(999L, "overflow".getBytes(), 256, true));
-  }
-
-  @Test
-  void handle_tooManyPendingStreams_evictsOldest() throws Exception {
-    for (long i = 1; i <= 16; i++) {
-      streamRegistry.handleChunk(i, "data".getBytes(), 0, false);
+    private String openedObjectKey() {
+      return openedObjectKey;
     }
 
-    streamRegistry.handleChunk(17L, "data".getBytes(), 0, false);
+    private byte[] object(String objectKey) {
+      return objects.get(objectKey);
+    }
 
-    ByteArrayOutputStream sink = new ByteArrayOutputStream();
-    streamRegistry.createStream(1L, sink);
+    private void failStore(String objectKey) {
+      failedStoreObjectKey = objectKey;
+    }
 
-    assertEquals(0, sink.size());
+    private boolean receivedBufferedInput(String objectKey) {
+      return bufferedInputs.getOrDefault(objectKey, false);
+    }
+
+  }
+
+  private static class TestDocumentWorkerGateway implements DocumentWorkerGateway {
+
+    private DocumentWorkerConnection connection;
+    private IOException               failure;
+
+    @Override
+    public DocumentWorkerConnection connect() throws IOException {
+      if (failure != null) {
+        throw failure;
+      }
+      return connection;
+    }
+
+    private void respondWith(DocumentWorkerConnection connection) {
+      this.connection = connection;
+      this.failure = null;
+    }
+
+    private void failWith(IOException failure) {
+      this.connection = null;
+      this.failure = failure;
+    }
   }
 }

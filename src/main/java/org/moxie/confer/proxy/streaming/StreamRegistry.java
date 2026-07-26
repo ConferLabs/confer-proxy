@@ -51,24 +51,54 @@ public class StreamRegistry {
    * @throws IOException if flushing pending chunks fails
    */
   public StreamContext createStream(long requestId, OutputStream sink) throws IOException {
-    StreamContext ctx = new StreamContext(requestId, sink);
+    return register(new StreamContext(requestId, sink));
+  }
+
+  public StreamContext createStream(long requestId, OutputStream sink, long maximumBytes) throws IOException {
+    if (maximumBytes < 1) {
+      throw new IOException("Maximum stream size must be positive");
+    }
+    return register(new StreamContext(requestId, sink, maximumBytes));
+  }
+
+  private StreamContext register(StreamContext ctx) throws IOException {
     Queue<PendingChunk> pending;
 
     synchronized (lock) {
       if (streams.size() >= MAX_ACTIVE_STREAMS) {
+        ctx.cancel();
         throw new IOException("Too many active streams");
       }
-      streams.put(requestId, ctx);
-      pending = pendingChunks.remove(requestId);
+      if (streams.containsKey(ctx.getRequestId())) {
+        ctx.cancel();
+        throw new IOException("Stream is already active");
+      }
+      streams.put(ctx.getRequestId(), ctx);
+      pending = pendingChunks.remove(ctx.getRequestId());
     }
 
-    if (pending != null) {
-      for (PendingChunk chunk : pending) {
-        ctx.write(chunk.data(), chunk.sequenceNumber(), chunk.isFinal());
+    try {
+      if (pending != null) {
+        for (PendingChunk chunk : pending) {
+          ctx.write(chunk.data(), chunk.sequenceNumber(), chunk.isFinal());
+        }
       }
+    } catch (IOException | RuntimeException error) {
+      remove(ctx);
+      ctx.cancel();
+      throw error;
+    }
+    if (ctx.isCompleted()) {
+      remove(ctx);
     }
 
     return ctx;
+  }
+
+  private void remove(StreamContext ctx) {
+    synchronized (lock) {
+      streams.remove(ctx.getRequestId(), ctx);
+    }
   }
 
   /**

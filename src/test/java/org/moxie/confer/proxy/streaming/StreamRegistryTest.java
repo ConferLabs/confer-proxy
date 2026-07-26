@@ -28,6 +28,13 @@ class StreamRegistryTest {
   }
 
   @Test
+  void createStream_rejectsInvalidMaximumAsCheckedFailure() {
+    assertThrows(
+        IOException.class,
+        () -> registry.createStream(1L, new ByteArrayOutputStream(), 0));
+  }
+
+  @Test
   void createStream_flushesPendingChunks() throws IOException {
     // Buffer chunks before stream exists
     registry.handleChunk(1L, "A".getBytes(), 0, false);
@@ -39,6 +46,16 @@ class StreamRegistryTest {
 
     assertEquals("AB", sink.toString());
     assertTrue(ctx.isCompleted());
+  }
+
+  @Test
+  void createStream_completedByPendingChunk_releasesRegistrySlot() throws IOException {
+    registry.handleChunk(1L, "done".getBytes(), 0, true);
+    registry.createStream(1L, new ByteArrayOutputStream());
+
+    StreamContext replacement = registry.createStream(1L, new ByteArrayOutputStream());
+
+    assertNotNull(replacement);
   }
 
   @Test
@@ -162,6 +179,15 @@ class StreamRegistryTest {
     // The 11th should throw
     assertThrows(IOException.class, () ->
         registry.createStream(11L, new ByteArrayOutputStream()));
+  }
+
+  @Test
+  void createStream_duplicateActiveId_throwsIOException() throws IOException {
+    registry.createStream(1L, new ByteArrayOutputStream());
+
+    assertThrows(
+        IOException.class,
+        () -> registry.createStream(1L, new ByteArrayOutputStream()));
   }
 
   @Test

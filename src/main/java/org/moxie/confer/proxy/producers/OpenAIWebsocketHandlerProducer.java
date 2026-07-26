@@ -6,11 +6,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
+import jakarta.validation.Validator;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.controllers.OpenAIWebsocketHandler;
-import org.moxie.confer.proxy.crypto.ImageToken;
+import org.moxie.confer.proxy.documents.DocumentToolSessionFactory;
+import org.moxie.confer.proxy.presenters.OpenAIMessagePresenter;
 import org.moxie.confer.proxy.qualifiers.VllmAI;
-import org.moxie.confer.proxy.tools.ToolRegistry;
+import org.moxie.confer.proxy.tools.registry.ToolRegistry;
 
 @ApplicationScoped
 public class OpenAIWebsocketHandlerProducer {
@@ -29,13 +31,26 @@ public class OpenAIWebsocketHandlerProducer {
   Config config;
 
   @Inject
-  ImageToken imageToken;
+  OpenAIMessagePresenter messagePresenter;
+
+  @Inject
+  DocumentToolSessionFactory documentToolSessions;
+
+  @Inject
+  Validator validator;
 
   @Produces
   @Named("vllm")
   @ApplicationScoped
   public OpenAIWebsocketHandler produceVllmAiHandler() {
-    return new OpenAIWebsocketHandler(vllmAIClient, mapper, toolRegistry, config, imageToken);
+    return new OpenAIWebsocketHandler(
+        vllmAIClient,
+        mapper,
+        toolRegistry,
+        config,
+        messagePresenter,
+        documentToolSessions,
+        validator);
   }
 
 }

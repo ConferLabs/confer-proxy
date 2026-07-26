@@ -1,0 +1,2 @@
+class OcrRequiredError(RuntimeError):
+  pass

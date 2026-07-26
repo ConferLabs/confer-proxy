@@ -19,23 +19,29 @@ import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
-import com.openai.models.chat.completions.ChatCompletionContentPart;
-import com.openai.models.chat.completions.ChatCompletionContentPartImage;
-import com.openai.models.chat.completions.ChatCompletionContentPartText;
 import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
-import jakarta.inject.Inject;
+import jakarta.validation.Validator;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
-import jakarta.ws.rs.core.StreamingOutput;
 import org.moxie.confer.proxy.config.Config;
-import org.moxie.confer.proxy.crypto.ImageToken;
+import org.moxie.confer.proxy.documents.DocumentToolSession;
+import org.moxie.confer.proxy.documents.DocumentToolSessionFactory;
+import org.moxie.confer.proxy.documents.InvalidDocumentManifestException;
 import org.moxie.confer.proxy.entities.ChatRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.entities.ToolCallContent;
 import org.moxie.confer.proxy.entities.ToolResponseContent;
+import org.moxie.confer.proxy.images.ImageReference;
+import org.moxie.confer.proxy.presenters.OpenAIMessagePresenter;
+import org.moxie.confer.proxy.presenters.ToolResultPresentation;
 import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.tools.Tool;
-import org.moxie.confer.proxy.tools.ToolRegistry;
+import org.moxie.confer.proxy.tools.ToolExecutionContext;
+import org.moxie.confer.proxy.tools.ToolRequirement;
+import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.tools.registry.RequestToolSet;
+import org.moxie.confer.proxy.tools.registry.ToolEligibility;
+import org.moxie.confer.proxy.tools.registry.ToolRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 import org.slf4j.Logger;
@@ -45,23 +51,35 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Gatherers;
 
 public class OpenAIWebsocketHandler implements WebsocketHandler {
 
   private static final Logger log = LoggerFactory.getLogger(OpenAIWebsocketHandler.class);
 
-  private final OpenAIClient client;
-  private final ObjectMapper mapper;
-  private final ToolRegistry toolRegistry;
-  private final Config       config;
-  private final ImageToken   imageToken;
+  private final OpenAIClient               client;
+  private final ObjectMapper               mapper;
+  private final ToolRegistry               toolRegistry;
+  private final Config                     config;
+  private final OpenAIMessagePresenter     messagePresenter;
+  private final DocumentToolSessionFactory documentToolSessions;
+  private final Validator                  validator;
 
-  public OpenAIWebsocketHandler(OpenAIClient client, ObjectMapper mapper, ToolRegistry toolRegistry, Config config, ImageToken imageToken) {
-    this.client       = client;
-    this.mapper       = mapper;
-    this.toolRegistry = toolRegistry;
-    this.config       = config;
-    this.imageToken   = imageToken;
+  public OpenAIWebsocketHandler(OpenAIClient client,
+                                ObjectMapper mapper,
+                                ToolRegistry toolRegistry,
+                                Config config,
+                                OpenAIMessagePresenter messagePresenter,
+                                DocumentToolSessionFactory documentToolSessions,
+                                Validator validator)
+  {
+    this.client               = client;
+    this.mapper               = mapper;
+    this.toolRegistry         = toolRegistry;
+    this.config               = config;
+    this.messagePresenter     = messagePresenter;
+    this.documentToolSessions = Objects.requireNonNull(documentToolSessions, "documentToolSessions");
+    this.validator            = Objects.requireNonNull(validator, "validator");
   }
 
   @Override
@@ -70,9 +88,12 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     ChatModel   model       = ChatModel.of(config.getVllmServedModelName());
 
     if (chatRequest.stream()) {
-      return new WebsocketHandlerResponse.StreamingResponse(handleStreamingResponse(model, chatRequest));
+      return new WebsocketHandlerResponse.StreamingResponse(
+          output -> handleStreamingResponse(model, chatRequest, output));
     } else {
-      return new WebsocketHandlerResponse.SingleResponse(200, handleNonStreamingRequest(model, chatRequest));
+      return new WebsocketHandlerResponse.SingleResponse(
+          200,
+          handleNonStreamingRequest(model, chatRequest));
     }
   }
 
@@ -82,25 +103,42 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
 
     try {
-      return mapper.readValue(request.body().get(), ChatRequest.class);
-    } catch (JsonProcessingException e) {
+      ChatRequest chatRequest = mapper.readValue(request.body().get(), ChatRequest.class);
+
+      if (chatRequest == null || !validator.validate(chatRequest).isEmpty()) {
+        throw new WebApplicationException("Invalid ChatRequest body", 400);
+      }
+
+      return chatRequest;
+    } catch (JsonProcessingException error) {
       throw new WebApplicationException("Invalid ChatRequest body", 400);
     }
   }
 
   private String handleNonStreamingRequest(ChatModel model, ChatRequest chatRequest) {
-    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>(), true);
+    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>(), false, RequestToolSet.empty());
     return client.chat().completions().create(params).choices().getFirst().message().content().orElse("");
   }
 
-  private StreamingOutput handleStreamingResponse(ChatModel model, ChatRequest chatRequest) {
-    return output -> {
+  private void handleStreamingResponse(ChatModel model,
+                                       ChatRequest chatRequest,
+                                       OutputStream output)
+  {
+    try {
+      DocumentToolSession documentSession = documentToolSessions.open(chatRequest.documents());
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
       int                              maxIterations       = config.getMaxToolIterations();
       int                              iteration           = 0;
       long                             contextTokens       = 0;
 
-      Set<String> clientToolNames = chatRequest.clientTools() != null ? chatRequest.clientTools().stream().map(ChatRequest.ClientTool::name).collect(Collectors.toSet()) : Set.of();
+      RequestToolSet       serverTools     = toolRegistry.forRequest(toolEligibility(chatRequest));
+      ToolExecutionContext toolContext     = new ToolExecutionContext(documentSession);
+      Set<String>          clientToolNames = chatRequest.clientTools() == null ? Set.of() :
+                                             chatRequest.clientTools()
+                                                        .stream()
+                                                        .map(ChatRequest.ClientTool::name)
+                                                        .filter(name -> !serverTools.contains(name))
+                                                        .collect(Collectors.toUnmodifiableSet());
 
       while (iteration++ < maxIterations) {
         boolean isLastIteration = iteration >= maxIterations;
@@ -112,7 +150,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
           conversationHistory.add(ChatCompletionMessageParam.ofUser(wrapUpMessage));
         }
 
-        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration);
+        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration, serverTools);
         ChunkProcessor             processor = new ChunkProcessor(mapper);
 
         try (StreamResponse<ChatCompletionChunk> response = client.chat().completions().createStreaming(params)) {
@@ -134,38 +172,28 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
           sendToolCallToClient(req, output);
         }
 
-        boolean webSearchDisabled = chatRequest.webSearch() != null && !chatRequest.webSearch();
+        toolCalls.serverToolCalls().stream()
+            .gather(Gatherers.mapConcurrent(
+                Math.max(1, toolCalls.serverToolCalls().size()),
+                request -> executeToolCall(request, serverTools, toolContext)))
+            .flatMap(Optional::stream)
+            .forEachOrdered(executed -> {
+              ToolCallRequest        request      = executed.request();
+              ToolResult             result       = executed.result();
+              ToolResultPresentation presentation = messagePresenter.presentToolResult(
+                  request.id(),
+                  result);
+              conversationHistory.addAll(presentation.messages());
 
-        for (ToolCallRequest req : toolCalls.serverToolCalls()) {
-          Optional<Tool> tool = toolRegistry.getTool(req.functionName());
-
-          if (tool.isPresent()) {
-            if (webSearchDisabled && tool.get().hasExternalRequests()) {
-              log.info("Skipping {} because web search is disabled", req.functionName());
-              String errorResult = "{\"error\": \"Web search is disabled for this conversation.\"}";
-
-              ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
-                                                                                         .toolCallId(req.id())
-                                                                                         .content(errorResult)
-                                                                                         .build();
-              conversationHistory.add(ChatCompletionMessageParam.ofTool(toolMessage));
-              continue;
-            }
-
-            String fullResult   = tool.get().execute(req.arguments(), req.id(), output);
-            String clientResult = tool.get().getClientResult(fullResult);
-
-            ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
-                                                                                       .toolCallId(req.id())
-                                                                                       .content(fullResult)
-                                                                                       .build();
-            conversationHistory.add(ChatCompletionMessageParam.ofTool(toolMessage));
-
-            sendToolResponseToClient(req.id(), req.functionName(), clientResult, toolCalls.hasClientToolCalls() ? fullResult : null, output);
-          } else {
-            log.warn("Unknown tool function: {}", req.functionName());
-          }
-        }
+              sendToolResponseToClient(request.id(),
+                                       request.functionName(),
+                                       result.clientContent(),
+                                       toolCalls.hasClientToolCalls() ? result.modelContent() : null,
+                                       toolCalls.hasClientToolCalls()
+                                           ? presentation.imageReferences()
+                                           : List.of(),
+                                       output);
+            });
 
         // Send client tool calls after server tools are done
         if (toolCalls.hasClientToolCalls()) {
@@ -180,10 +208,46 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
       log.warn("Reached maximum tool calling iterations ({})", maxIterations);
       sendCompletion(output, false, contextTokens);
-    };
+    } catch (InvalidDocumentManifestException error) {
+      throw new WebApplicationException("Invalid document references", 400);
+    }
   }
 
-  private ChatCompletionCreateParams buildCompletionParams(ChatModel model, ChatRequest chatRequest, List<ChatCompletionMessageParam> additionalMessages, boolean includeTools) {
+  private Optional<ExecutedToolCall> executeToolCall(ToolCallRequest request,
+                                                     RequestToolSet serverTools,
+                                                     ToolExecutionContext context)
+  {
+    Optional<Tool> tool = serverTools.find(request.functionName());
+
+    if (tool.isEmpty()) {
+      log.warn("Unknown tool function: {}", request.functionName());
+      return Optional.empty();
+    }
+
+    ToolResult result = tool.orElseThrow().execute(request.arguments(), context);
+    return Optional.of(new ExecutedToolCall(request, result));
+  }
+
+  private ToolEligibility toolEligibility(ChatRequest request) {
+    Set<ToolRequirement> satisfiedRequirements = EnumSet.noneOf(ToolRequirement.class);
+
+    if (!Boolean.FALSE.equals(request.webSearch())) {
+      satisfiedRequirements.add(ToolRequirement.WEB_ACCESS);
+    }
+
+    if (request.documents() != null && !request.documents().isEmpty()) {
+      satisfiedRequirements.add(ToolRequirement.DOCUMENTS);
+    }
+
+    return new ToolEligibility(satisfiedRequirements);
+  }
+
+  private ChatCompletionCreateParams buildCompletionParams(ChatModel model,
+                                                           ChatRequest chatRequest,
+                                                           List<ChatCompletionMessageParam> additionalMessages,
+                                                           boolean includeTools,
+                                                           RequestToolSet serverTools)
+  {
     ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                                                                            .model(model);
 
@@ -237,8 +301,8 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       switch (message.role()) {
         case assistant -> builder.addAssistantMessage(message.content());
         case user      -> {
-          if (message.imageRefs() != null && !message.imageRefs().isEmpty()) {
-            builder.addMessage(ChatCompletionMessageParam.ofUser(buildMultimodalUserMessage(message)));
+          if (hasImages(message)) {
+            builder.addMessage(ChatCompletionMessageParam.ofUser(messagePresenter.presentUserMessage(message.content(), message.imageRefs())));
           } else {
             builder.addUserMessage(message.content());
           }
@@ -263,7 +327,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
             builder.addMessage(ChatCompletionMessageParam.ofAssistant(assistantMessageParam));
           } catch (JsonProcessingException e) {
-            log.error("Failed to parse tool_call content: {}", message.content(), e);
+            log.error("Failed to parse tool_call content", e);
             throw new WebApplicationException("Invalid tool_call message content", 400);
           }
         }
@@ -278,7 +342,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
             builder.addMessage(ChatCompletionMessageParam.ofTool(toolMessage));
           } catch (JsonProcessingException e) {
-            log.error("Failed to parse tool_response content: {}", message.content(), e);
+            log.error("Failed to parse tool_response content", e);
             throw new WebApplicationException("Invalid tool_response message content", 400);
           }
         }
@@ -290,58 +354,34 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
 
     if (includeTools) {
-      addToolsToBuilder(builder, chatRequest.webSearch(), chatRequest.clientTools());
+      addToolsToBuilder(builder, chatRequest.clientTools(), serverTools);
     }
 
     return builder.build();
   }
 
-  private ChatCompletionUserMessageParam buildMultimodalUserMessage(ChatRequest.Message message) {
-    List<ChatCompletionContentPart> parts = new ArrayList<>();
-
-    if (message.content() != null && !message.content().isEmpty()) {
-      parts.add(ChatCompletionContentPart.ofText(
-        ChatCompletionContentPartText.builder().text(message.content()).build()
-      ));
-    }
-
-    for (ChatRequest.ImageRef ref : message.imageRefs()) {
-      String imageUrl = "http://localhost:" + config.getServerPort()
-        + "/v1/images?key=" + urlEncode(ref.s3Key())
-        + "&ek=" + urlEncode(ref.encryptionKey())
-        + "&token=" + urlEncode(imageToken.get())
-        + "&type=" + urlEncode(ref.mediaType() != null ? ref.mediaType() : "image/jpeg");
-
-      parts.add(ChatCompletionContentPart.ofImageUrl(
-        ChatCompletionContentPartImage.builder()
-          .imageUrl(ChatCompletionContentPartImage.ImageUrl.builder().url(imageUrl).build())
-          .build()
-      ));
-    }
-
-    return ChatCompletionUserMessageParam.builder()
-      .content(ChatCompletionUserMessageParam.Content.ofArrayOfContentParts(parts))
-      .build();
+  private static boolean hasImages(ChatRequest.Message message) {
+    return message.imageRefs() != null && !message.imageRefs().isEmpty();
   }
 
-  private static String urlEncode(String value) {
-    return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
-  }
-
-  private void addToolsToBuilder(ChatCompletionCreateParams.Builder builder, Boolean webSearch, List<ChatRequest.ClientTool> clientTools) {
-    boolean includeExternalTools = webSearch == null || webSearch;
-
-    for (Tool tool : toolRegistry.getAllTools().values()) {
-      if (includeExternalTools || !tool.hasExternalRequests()) {
-        builder.addTool(ChatCompletionFunctionTool.builder()
-                                                  .function(tool.getFunctionDefinition())
-                                                  .build());
-      }
+  private void addToolsToBuilder(ChatCompletionCreateParams.Builder builder,
+                                 List<ChatRequest.ClientTool> clientTools,
+                                 RequestToolSet serverTools)
+  {
+    for (Tool tool : serverTools.values()) {
+      builder.addTool(ChatCompletionFunctionTool.builder()
+                                                .function(tool.getFunctionDefinition())
+                                                .build());
     }
 
     if (clientTools != null) {
       for (ChatRequest.ClientTool ct : clientTools) {
+        if (serverTools.contains(ct.name())) {
+          continue;
+        }
+
         FunctionParameters.Builder paramsBuilder = FunctionParameters.builder();
+
         for (Map.Entry<String, Object> entry : ct.parameters().entrySet()) {
           paramsBuilder.putAdditionalProperty(entry.getKey(), com.openai.core.JsonValue.from(entry.getValue()));
         }
@@ -412,7 +452,13 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
   }
 
-  private void sendToolResponseToClient(String toolCallId, String toolName, String content, String fullContent, OutputStream output) {
+  private void sendToolResponseToClient(String toolCallId,
+                                        String toolName,
+                                        String content,
+                                        String fullContent,
+                                        List<ImageReference> imageRefs,
+                                        OutputStream output)
+  {
     try {
       Map<String, Object> toolResponseMessage = new LinkedHashMap<>();
       toolResponseMessage.put("type", "tool_response");
@@ -422,6 +468,10 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
       if (fullContent != null) {
         toolResponseMessage.put("full_content", fullContent);
+      }
+
+      if (!imageRefs.isEmpty()) {
+        toolResponseMessage.put("image_refs", imageRefs);
       }
 
       String message = mapper.writeValueAsString(toolResponseMessage);
@@ -481,7 +531,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
   private static class ChunkProcessor {
 
-    private final Map<Integer, ToolCallAccumulator> toolCalls = new HashMap<>();
+    private final Map<Integer, ToolCallAccumulator> toolCalls = new TreeMap<>();
     private final ObjectMapper mapper;
     private CompletionUsage    usage;
 

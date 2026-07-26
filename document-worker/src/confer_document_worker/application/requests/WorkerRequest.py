@@ -1,0 +1,2 @@
+class WorkerRequest:
+  pass

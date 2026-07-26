@@ -90,6 +90,13 @@ class ImageControllerTest {
   }
 
   @Test
+  void rejectsMalformedObjectStorageKey() {
+    WebApplicationException ex = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("../another/object", "ek", imageToken.get(), null));
+    assertEquals(400, ex.getResponse().getStatus());
+  }
+
+  @Test
   void rejectsMissingEncryptionKey() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
       () -> controller.getImage("key", null, imageToken.get(), null));
@@ -120,7 +127,7 @@ class ImageControllerTest {
 
     when(config.getS3Bucket()).thenReturn("test-bucket");
     when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().build(),
+      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
         AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
 
     Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), "image/jpeg");
@@ -131,6 +138,28 @@ class ImageControllerTest {
     stream.write(out);
 
     assertArrayEquals(plaintext, out.toByteArray());
+  }
+
+  @Test
+  void rejectsOversizedEncryptedImageBeforeDecryption() {
+    when(config.getS3Bucket()).thenReturn("test-bucket");
+    when(s3.getObject(any(GetObjectRequest.class)))
+      .thenReturn(new ResponseInputStream<>(
+          GetObjectResponse.builder().contentLength(65L * 1024 * 1024).build(),
+          AbortableInputStream.create(new ByteArrayInputStream(new byte[0]))));
+
+    Response response = controller.getImage(
+        "opaque-namespace/image",
+        Base64.getEncoder().encodeToString(new byte[32]),
+        imageToken.get(),
+        "image/jpeg");
+    StreamingOutput stream = (StreamingOutput) response.getEntity();
+
+    WebApplicationException error = assertThrows(
+        WebApplicationException.class,
+        () -> stream.write(new ByteArrayOutputStream()));
+
+    assertEquals(500, error.getResponse().getStatus());
   }
 
   // --- Corruption mid-stream ---
@@ -158,7 +187,7 @@ class ImageControllerTest {
 
     when(config.getS3Bucket()).thenReturn("test-bucket");
     when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().build(),
+      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
         AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
 
     Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), null);
@@ -188,7 +217,7 @@ class ImageControllerTest {
 
     when(config.getS3Bucket()).thenReturn("test-bucket");
     when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().build(),
+      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) truncated.length).build(),
         AbortableInputStream.create(new ByteArrayInputStream(truncated))));
 
     Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), null);
@@ -211,7 +240,7 @@ class ImageControllerTest {
 
     when(config.getS3Bucket()).thenReturn("test-bucket");
     when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().build(),
+      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
         AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
 
     Response response = controller.getImage("attachments/test.enc", wrongBase64Key, imageToken.get(), null);

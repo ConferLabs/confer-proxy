@@ -45,11 +45,14 @@ public record WebsocketRequest(
    * Convert from protobuf WebsocketRequest to domain model.
    * Validates that required fields are present based on message type.
    *
-   * @throws IllegalArgumentException if required fields are missing
+   * @throws InvalidWebsocketRequestException if required fields are missing
    */
-  public static WebsocketRequest fromProtobuf(confer.NoiseTransport.WebsocketRequest proto) {
+  public static WebsocketRequest fromProtobuf(confer.NoiseTransport.WebsocketRequest proto)
+    throws InvalidWebsocketRequestException
+  {
     if (!proto.hasId()) {
-      throw new IllegalArgumentException("WebsocketRequest missing required field: id");
+      throw new InvalidWebsocketRequestException(
+          "WebsocketRequest missing required field: id");
     }
 
     Optional<String> verb = proto.hasVerb() && !proto.getVerb().isEmpty()
@@ -65,7 +68,8 @@ public record WebsocketRequest(
     if (proto.hasChunk()) {
       int seq = proto.getChunk().getSeq();
       if (seq < 0) {
-        throw new IllegalArgumentException("Chunk sequence number must be non-negative");
+        throw new InvalidWebsocketRequestException(
+            "Chunk sequence number must be non-negative");
       }
       chunk = Optional.of(new StreamChunk(
           proto.getChunk().getData().toByteArray(),
@@ -79,11 +83,13 @@ public record WebsocketRequest(
     boolean hasChunk = chunk.isPresent();
 
     if (hasVerb != hasPath) {
-      throw new IllegalArgumentException("WebsocketRequest must have both verb and path, or neither");
+      throw new InvalidWebsocketRequestException(
+          "WebsocketRequest must have both verb and path, or neither");
     }
 
     if (!hasVerb && !hasChunk) {
-      throw new IllegalArgumentException("WebsocketRequest must have verb/path or chunk");
+      throw new InvalidWebsocketRequestException(
+          "WebsocketRequest must have verb/path or chunk");
     }
 
     return new WebsocketRequest(proto.getId(), verb, path, body, chunk);

@@ -2,7 +2,7 @@ package org.moxie.confer.proxy.tools;
 
 import com.openai.models.FunctionDefinition;
 
-import java.io.OutputStream;
+import java.util.Set;
 
 public interface Tool {
   /**
@@ -19,29 +19,17 @@ public interface Tool {
    * Execute the tool with the given arguments
    *
    * @param arguments JSON string of tool arguments
-   * @param toolCallId The ID of the tool call
-   * @param output Output stream to send notifications to client
-   * @return The result of the tool execution (full result for model context)
+   * @param context Request-specific resources available during this execution
+   * @return Content and attachments produced by the tool
    */
-  String execute(String arguments, String toolCallId, OutputStream output);
+  ToolResult execute(String arguments, ToolExecutionContext context);
 
   /**
-   * Whether this tool makes external network requests (e.g. web search, page fetch).
-   * Tools that return true can be disabled by the client via the webSearch flag.
+   * Get the request capabilities that must be available before this tool can be
+   * advertised or executed.
    */
-  default boolean hasExternalRequests() {
-    return false;
+  default Set<ToolRequirement> getRequirements() {
+    return Set.of();
   }
 
-  /**
-   * Get the client-friendly version of a tool result for persistence.
-   * By default, returns the full result. Tools can override to provide
-   * a summarized version to avoid storing large content.
-   *
-   * @param fullResult The full result from execute()
-   * @return The result to send to the client for persistence
-   */
-  default String getClientResult(String fullResult) {
-    return fullResult;
-  }
 }

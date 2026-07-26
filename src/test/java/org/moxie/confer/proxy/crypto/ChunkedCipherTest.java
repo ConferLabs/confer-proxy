@@ -2,11 +2,19 @@ package org.moxie.confer.proxy.crypto;
 
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
 import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.Random;
 
+import static org.moxie.confer.proxy.crypto.ChunkedCipher.Mode.DECRYPT;
+import static org.moxie.confer.proxy.crypto.ChunkedCipher.Mode.ENCRYPT;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -51,7 +59,7 @@ class ChunkedCipherTest {
   // --- Successful decryption ---
 
   @Test void decryptsEmptyData() throws GeneralSecurityException {
-    byte[] plaintext = new ChunkedCipher(KEY).decrypt(hex(
+    byte[] plaintext = new ChunkedCipher(KEY, DECRYPT).doFinal(hex(
       "010001000077a29bedf929f8ade440956e19b4eacf"
       + "994c0d990fdcc31fd1f489bb8203d043155b3255155f8012fdbdb928"
     ));
@@ -59,11 +67,11 @@ class ChunkedCipherTest {
   }
 
   @Test void decryptsSmallData() throws GeneralSecurityException {
-    assertArrayEquals("Hello, World!".getBytes(), new ChunkedCipher(KEY).decrypt(hex(SMALL)));
+    assertArrayEquals("Hello, World!".getBytes(), new ChunkedCipher(KEY, DECRYPT).doFinal(hex(SMALL)));
   }
 
   @Test void decrypts1000BytePattern() throws GeneralSecurityException {
-    byte[] plaintext = new ChunkedCipher(KEY).decrypt(hex(
+    byte[] plaintext = new ChunkedCipher(KEY, DECRYPT).doFinal(hex(
       "01000100002fc605c72109251d52d5ab35449fe83a5cec15dca15f3f658d0bf49cef4f5a37f1be03"
       + "d5bf1cfb14bf7da38b4abc7704e94f5862cb30852204e01ebe35e8a0d33f1040ba326437902a09de"
       + "09f60bcb11c19e48f7942af142fdc722b1f86b371cd7b19e1edd1f7365935fc84ca954591702b2e3"
@@ -96,11 +104,11 @@ class ChunkedCipherTest {
   }
 
   @Test void decryptsMultipleChunks() throws GeneralSecurityException {
-    assertArrayEquals(sequentialPattern(180), new ChunkedCipher(KEY).decrypt(hex(THREE_CHUNKS)));
+    assertArrayEquals(sequentialPattern(180), new ChunkedCipher(KEY, DECRYPT).doFinal(hex(THREE_CHUNKS)));
   }
 
   @Test void decryptsExactChunkBoundary() throws GeneralSecurityException {
-    byte[] plaintext = new ChunkedCipher(KEY).decrypt(hex(
+    byte[] plaintext = new ChunkedCipher(KEY, DECRYPT).doFinal(hex(
       "01000000409c9ecb5fee221e8ec6cf2b8a2fc3554b"
       + "8f617bee54880dc485b70d609ae4d15dff791c1291c76f0593fe1a241fb2e7914f0e9122f143a49d"
       + "d4ca20d7f1156f87247f8c5f87dfcf5f828950c4e6835111769333015dd5508a5a70f260bbe29be9"
@@ -117,7 +125,9 @@ class ChunkedCipherTest {
 
   @Test void rejectsWrongKey() {
     assertThrows(GeneralSecurityException.class,
-      () -> new ChunkedCipher("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=").decrypt(hex(SMALL)));
+      () -> new ChunkedCipher(
+          "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+          DECRYPT).doFinal(hex(SMALL)));
   }
 
   @Test void rejectsTamperedCiphertextByte() {
@@ -215,14 +225,14 @@ class ChunkedCipherTest {
 
   private static void assertTampered(String ciphertextHex) {
     assertThrows(GeneralSecurityException.class,
-      () -> new ChunkedCipher(KEY).decrypt(hex(ciphertextHex)));
+      () -> new ChunkedCipher(KEY, DECRYPT).doFinal(hex(ciphertextHex)));
   }
 
   // --- Streaming decryption ---
 
   @Test void streamingMatchesOneShot() throws GeneralSecurityException {
     byte[] ciphertext = hex(THREE_CHUNKS);
-    ChunkedCipher cipher = new ChunkedCipher(KEY);
+    ChunkedCipher cipher = new ChunkedCipher(KEY, DECRYPT);
     ByteArrayOutputStream out = new ByteArrayOutputStream();
 
     int piece = 37; // deliberately misaligned
@@ -237,7 +247,7 @@ class ChunkedCipherTest {
 
   @Test void streamingWithHeaderSplitAcrossUpdates() throws GeneralSecurityException {
     byte[] ct = hex(SMALL);
-    ChunkedCipher cipher = new ChunkedCipher(KEY);
+    ChunkedCipher cipher = new ChunkedCipher(KEY, DECRYPT);
     ByteArrayOutputStream out = new ByteArrayOutputStream();
 
     out.writeBytes(cipher.update(Arrays.copyOfRange(ct, 0, 10)));   // partial header
@@ -245,5 +255,139 @@ class ChunkedCipherTest {
     out.writeBytes(cipher.doFinal(Arrays.copyOfRange(ct, 25, ct.length)));
 
     assertArrayEquals("Hello, World!".getBytes(), out.toByteArray());
+  }
+
+  @Test void updateEmitsACompleteNonFinalChunk() throws GeneralSecurityException {
+    byte[] ciphertext = hex(THREE_CHUNKS);
+    int firstChunkEnd = 21 + 12 + 64 + 16;
+    ChunkedCipher cipher = new ChunkedCipher(KEY, DECRYPT);
+
+    byte[] update = cipher.update(Arrays.copyOfRange(ciphertext, 0, firstChunkEnd));
+    byte[] finalChunk = cipher.doFinal(Arrays.copyOfRange(
+        ciphertext,
+        firstChunkEnd,
+        ciphertext.length));
+
+    assertArrayEquals(Arrays.copyOfRange(sequentialPattern(180), 0, 64), update);
+    assertArrayEquals(Arrays.copyOfRange(sequentialPattern(180), 64, 180), finalChunk);
+  }
+
+  @Test
+  void encryptsAcrossRandomizedUpdateBoundaries() throws GeneralSecurityException {
+    Random random = new Random(0x4348554e4bL);
+
+    for (int iteration = 0; iteration < 50; iteration++) {
+      byte[] plaintext = new byte[random.nextInt((3 * 64 * 1024) + 2)];
+      random.nextBytes(plaintext);
+      ChunkedCipher encrypting = new ChunkedCipher(
+          new SecretKeySpec(new byte[32], "AES"),
+          ENCRYPT);
+      ByteArrayOutputStream encrypted = new ByteArrayOutputStream();
+      encrypted.writeBytes(encrypting.getHeader());
+
+      int offset = 0;
+      while (offset < plaintext.length) {
+        int length = Math.min(1 + random.nextInt(4096), plaintext.length - offset);
+        encrypted.writeBytes(encrypting.update(plaintext, offset, length));
+        offset += length;
+      }
+      encrypted.writeBytes(encrypting.doFinal());
+
+      assertArrayEquals(
+          plaintext,
+          new ChunkedCipher(KEY, DECRYPT).doFinal(encrypted.toByteArray()),
+          "iteration=" + iteration + ", size=" + plaintext.length);
+    }
+  }
+
+  @Test
+  void supportsEveryValidAesKeyLength() throws GeneralSecurityException {
+    int[] keyLengths = new int[] {16, 24, 32};
+
+    for (int keyLength : keyLengths) {
+      byte[] rawKey = new byte[keyLength];
+      Arrays.fill(rawKey, (byte) keyLength);
+      ChunkedCipher encrypting = new ChunkedCipher(new SecretKeySpec(rawKey, "AES"), ENCRYPT);
+      ByteArrayOutputStream encrypted = new ByteArrayOutputStream();
+      encrypted.writeBytes(encrypting.getHeader());
+      encrypted.writeBytes(encrypting.doFinal(sequentialPattern(257)));
+
+      assertArrayEquals(
+          sequentialPattern(257),
+          new ChunkedCipher(Base64.getEncoder().encodeToString(rawKey), DECRYPT)
+              .doFinal(encrypted.toByteArray()),
+          "keyLength=" + keyLength);
+    }
+  }
+
+  @Test
+  void rejectsInvalidUpdateRangesWithoutFinalizing() throws GeneralSecurityException {
+    ChunkedCipher cipher = new ChunkedCipher(new SecretKeySpec(new byte[32], "AES"), ENCRYPT);
+    byte[] input = new byte[8];
+
+    assertThrows(IndexOutOfBoundsException.class, () -> cipher.update(input, -1, 1));
+    assertThrows(IndexOutOfBoundsException.class, () -> cipher.update(input, 8, 1));
+    assertThrows(IndexOutOfBoundsException.class, () -> cipher.update(input, 0, 9));
+    assertThrows(NullPointerException.class, () -> cipher.update(null));
+
+    cipher.doFinal();
+  }
+
+  @Test
+  void rejectsOperationsAfterSuccessfulFinalization() throws GeneralSecurityException {
+    ChunkedCipher cipher = new ChunkedCipher(new SecretKeySpec(new byte[32], "AES"), ENCRYPT);
+    cipher.doFinal();
+
+    assertThrows(GeneralSecurityException.class, () -> cipher.update(new byte[0]));
+    assertThrows(GeneralSecurityException.class, cipher::doFinal);
+    assertThrows(GeneralSecurityException.class, () -> cipher.doFinal(new byte[0]));
+  }
+
+  @Test
+  void rejectsOperationsAfterFailedFinalization() {
+    ChunkedCipher cipher = new ChunkedCipher(KEY, DECRYPT);
+
+    assertThrows(GeneralSecurityException.class, () -> cipher.doFinal(hex(SMALL + "00")));
+    assertThrows(GeneralSecurityException.class, () -> cipher.update(hex(SMALL)));
+    assertThrows(GeneralSecurityException.class, cipher::doFinal);
+  }
+
+  @Test
+  void enforcesModeAndInitializationBoundaries() throws GeneralSecurityException {
+    SecretKey key = new SecretKeySpec(new byte[32], "AES");
+    ChunkedCipher encrypting = new ChunkedCipher(key, ENCRYPT);
+    ChunkedCipher decrypting = new ChunkedCipher(key, DECRYPT);
+
+    assertThrows(IllegalStateException.class, () -> encrypting.getPlaintextLength(49));
+    assertThrows(IllegalStateException.class, decrypting::getHeader);
+    assertThrows(IllegalStateException.class, decrypting::getPlaintextChunkSize);
+    assertThrows(IllegalStateException.class, decrypting::getEncryptedChunkSize);
+
+    decrypting.update(Arrays.copyOfRange(hex(SMALL), 0, 21));
+    decrypting.getPlaintextChunkSize();
+    decrypting.getEncryptedChunkSize();
+  }
+
+  @Test
+  void returnsASeparateHeaderCopy() {
+    ChunkedCipher cipher = new ChunkedCipher(new SecretKeySpec(new byte[32], "AES"), ENCRYPT);
+
+    byte[] first = cipher.getHeader();
+    byte[] second = cipher.getHeader();
+    first[0] = 99;
+
+    assertNotSame(first, second);
+    assertArrayEquals(second, cipher.getHeader());
+  }
+
+  @Test
+  void rejectsNullDependencies() {
+    SecretKey key = new SecretKeySpec(new byte[32], "AES");
+    SecureRandom random = new SecureRandom();
+
+    assertThrows(NullPointerException.class, () -> new ChunkedCipher((SecretKey) null, ENCRYPT));
+    assertThrows(NullPointerException.class, () -> new ChunkedCipher(key, null));
+    assertThrows(NullPointerException.class, () -> new ChunkedCipher(key, ENCRYPT, null));
+    assertThrows(NullPointerException.class, () -> new ChunkedCipher(null, ENCRYPT, random));
   }
 }

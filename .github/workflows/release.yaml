@@ -128,6 +128,11 @@ jobs:
           java-version: '25'
           distribution: 'temurin'
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -144,7 +149,15 @@ jobs:
           fi
 
       - name: Build and upload proxy (ship profile)
-        run: mvn -B package -Pship -DskipTests
+        run: mvn -B clean package -Pship -DskipTests
+
+      - name: Verify document worker is in proxy archive
+        run: |
+          unzip -l target/proxy-*.zip | grep -q 'document-worker/src/confer_document_worker/main.py'
+          unzip -l target/proxy-*.zip | grep -q 'document-worker/runtime/pymupdf/__init__.py'
+          unzip -l target/proxy-*.zip | grep -q 'document-worker/runtime/docling/__init__.py'
+          unzip -l target/proxy-*.zip | grep -q 'document-worker/runtime/openpyxl/__init__.py'
+          unzip -l target/proxy-*.zip | grep -q 'document-worker/LICENSE'
 
       - name: Download image artifacts
         run: |
@@ -257,4 +270,3 @@ jobs:
 
           # Also upload manifest by hash for Rekor lookups
           aws s3 cp manifest.json s3://${S3_BUCKET}/manifests/${MANIFEST_HASH}.json
-

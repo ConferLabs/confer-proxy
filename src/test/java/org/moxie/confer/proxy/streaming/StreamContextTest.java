@@ -136,17 +136,14 @@ class StreamContextTest {
 
   @Test
   void write_exceedsMaxSize_throwsIOException() throws IOException {
-    // 50 MB limit, write chunks until we exceed it
-    byte[] chunk = new byte[1024 * 1024]; // 1 MB chunks
+    byte[] chunk = new byte[1024];
+    StreamContext limited = new StreamContext(4L, sink, 2 * 1024);
 
-    // Write 50 chunks (50 MB) - should succeed
-    for (int i = 0; i < 50; i++) {
-      context.write(chunk, i, false);
-    }
+    limited.write(chunk, 0, false);
+    limited.write(chunk, 1, false);
 
-    // 51st chunk should fail
     IOException ex = assertThrows(IOException.class, () ->
-        context.write(chunk, 50, false));
+        limited.write(chunk, 2, false));
     assertTrue(ex.getMessage().contains("exceeded maximum size"));
   }
 }

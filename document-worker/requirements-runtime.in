@@ -1,0 +1,4 @@
+docling-slim[format-office,format-web]==2.112.0
+PyMuPDF==1.26.7
+pypdfium2==5.6.0
+zstandard==0.25.0

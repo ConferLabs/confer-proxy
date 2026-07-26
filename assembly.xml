@@ -24,4 +24,36 @@
             <scope>runtime</scope>
         </dependencySet>
     </dependencySets>
+
+    <fileSets>
+        <fileSet>
+            <directory>${project.basedir}/document-worker/src</directory>
+            <outputDirectory>document-worker/src</outputDirectory>
+            <useDefaultExcludes>true</useDefaultExcludes>
+            <excludes>
+                <exclude>**/__pycache__/**</exclude>
+                <exclude>**/*.pyc</exclude>
+            </excludes>
+        </fileSet>
+        <fileSet>
+            <directory>${project.basedir}/document-worker</directory>
+            <outputDirectory>document-worker</outputDirectory>
+            <useDefaultExcludes>true</useDefaultExcludes>
+            <includes>
+                <include>LICENSE</include>
+                <include>pyproject.toml</include>
+                <include>requirements-runtime.txt</include>
+                <include>requirements-runtime.in</include>
+            </includes>
+        </fileSet>
+        <fileSet>
+            <directory>${project.build.directory}/document-worker/runtime</directory>
+            <outputDirectory>document-worker/runtime</outputDirectory>
+            <useDefaultExcludes>true</useDefaultExcludes>
+            <excludes>
+                <exclude>**/__pycache__/**</exclude>
+                <exclude>**/*.pyc</exclude>
+            </excludes>
+        </fileSet>
+    </fileSets>
 </assembly>

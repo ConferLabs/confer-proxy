@@ -1,4 +1,4 @@
-package org.moxie.confer.proxy.tools;
+package org.moxie.confer.proxy.tools.web;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,13 +8,17 @@ import com.openai.models.FunctionParameters;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.moxie.confer.proxy.services.TavilySearchService;
+import org.moxie.confer.proxy.tools.Tool;
+import org.moxie.confer.proxy.tools.ToolExecutionContext;
+import org.moxie.confer.proxy.tools.ToolRequirement;
+import org.moxie.confer.proxy.tools.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class PageFetchTool implements Tool {
@@ -57,20 +61,21 @@ public class PageFetchTool implements Tool {
   }
 
   @Override
-  public boolean hasExternalRequests() {
-    return true;
+  public Set<ToolRequirement> getRequirements() {
+    return Set.of(ToolRequirement.WEB_ACCESS);
   }
 
   @Override
-  public String execute(String arguments, String toolCallId, OutputStream output) {
+  public ToolResult execute(String arguments, ToolExecutionContext context) {
     try {
       List<String>                        urls            = parseUrls(arguments);
       TavilySearchService.ExtractResponse extractResponse = tavilySearch.extract(urls);
+      String modelContent = formatExtractResults(urls, extractResponse);
 
-      return formatExtractResults(urls, extractResponse);
+      return ToolResult.text(modelContent, summarizeForClient(modelContent));
     } catch (IOException e) {
       log.error("Error fetching page content", e);
-      return "Error fetching page content: " + e.getMessage();
+      return ToolResult.text("Error fetching page content: " + e.getMessage());
     }
   }
 
@@ -101,8 +106,7 @@ public class PageFetchTool implements Tool {
     }
   }
 
-  @Override
-  public String getClientResult(String fullResult) {
+  private String summarizeForClient(String fullResult) {
     try {
       // Parse the full result to extract just the metadata
       JsonNode resultNode = mapper.readTree(fullResult);

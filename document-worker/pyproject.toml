@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling==1.28.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "confer-document-worker"
+version = "0.1.0"
+description = "Sandboxed document extraction and retrieval worker for Confer"
+requires-python = ">=3.12"
+license = "AGPL-3.0-only"
+dependencies = [
+  "docling-slim[format-office,format-web]==2.112.0",
+  "PyMuPDF==1.26.7",
+  # Docling Slim 2.112 imports its PDF outline helper even when only the
+  # non-PDF backends are used, but does not declare this runtime dependency.
+  "pypdfium2==5.6.0",
+  "zstandard==0.25.0",
+]
+
+[project.optional-dependencies]
+rapidocr = [
+  "numpy==2.3.5",
+  "onnxruntime==1.22.0",
+  "rapidocr==3.9.1",
+]
+test = [
+  "mypy==2.2.0",
+  "numpy==2.3.5",
+  "onnxruntime==1.22.0",
+  "pytest==9.0.2",
+  "pytest-cov==7.1.0",
+  "rapidocr==3.9.1",
+  "ruff==0.15.22",
+]
+
+[project.scripts]
+confer-document-worker = "confer_document_worker.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/confer_document_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov=confer_document_worker --cov-report=term-missing --cov-fail-under=75"
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["confer_document_worker"]
+mypy_path = "src"
+check_untyped_defs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+no_implicit_optional = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unreachable = true
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B", "SIM"]
+
+[tool.coverage.run]
+branch = true
+source = ["confer_document_worker"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

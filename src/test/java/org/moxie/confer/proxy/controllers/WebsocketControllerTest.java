@@ -11,6 +11,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.attestation.AttestationService;
+import org.moxie.confer.proxy.lifecycle.ManagedResource;
+import org.moxie.confer.proxy.websocket.Route;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
@@ -104,7 +106,7 @@ class WebsocketControllerTest {
       try {
         slowHandlerCanFinish.await(10, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
+        throw new AssertionError(e);
       }
       return new WebsocketHandlerResponse.SingleResponse(200, "slow response");
     };
@@ -151,6 +153,31 @@ class WebsocketControllerTest {
   }
 
   @Test
+  void initializeRoutesKeepsLegacyAndStoredExtractionSeparate() {
+    LegacyDocumentExtractionHandler legacy = mock(LegacyDocumentExtractionHandler.class);
+    DocumentExtractionHandler stored = mock(DocumentExtractionHandler.class);
+    controller.legacyDocumentExtractionHandler = legacy;
+    controller.documentExtractionHandler = stored;
+    controller.vllmWebsocketHandler = mock(OpenAIWebsocketHandler.class);
+    controller.pingWebsocketHandler = mock(PingWebsocketHandler.class);
+    controller.embeddingHandler = mock(EmbeddingHandler.class);
+    controller.externalProxyFetchHandler = mock(ExternalProxyFetchHandler.class);
+
+    controller.testInitializeRoutes();
+
+    assertSame(
+        legacy,
+        controller.handlerFor(new Route(
+            "POST",
+            "/v1/document/extract")));
+    assertSame(
+        stored,
+        controller.handlerFor(new Route(
+            "POST",
+            "/v2/document/extract")));
+  }
+
+  @Test
   void onReceiveMessage_returnsImmediately() throws Exception {
     // Verify that onReceiveMessage returns immediately (doesn't block on handler)
 
@@ -162,7 +189,7 @@ class WebsocketControllerTest {
       try {
         handlerCanFinish.await(10, TimeUnit.SECONDS);
       } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
+        throw new AssertionError(e);
       }
       return new WebsocketHandlerResponse.SingleResponse(200, "done");
     };
@@ -282,7 +309,7 @@ class WebsocketControllerTest {
           chunkReceived.await(5, TimeUnit.SECONDS);
           output.write("done".getBytes());
         } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
+          throw new AssertionError(e);
         }
       });
     };
@@ -373,10 +400,12 @@ class WebsocketControllerTest {
 
   @Test
   void onReceiveMessage_streamingResponse_writesToOutput() throws Exception {
-    java.util.concurrent.CountDownLatch handlerComplete = new java.util.concurrent.CountDownLatch(1);
+    CountDownLatch handlerComplete = new CountDownLatch(1);
+    CountDownLatch resourceClosed  = new CountDownLatch(1);
+    ManagedResource resource       = resourceClosed::countDown;
 
     WebsocketHandler streamingHandler = (request, registry) -> {
-      return new WebsocketHandlerResponse.StreamingResponse(output -> {
+      return WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
         output.write("chunk1".getBytes());
         output.write("chunk2".getBytes());
         handlerComplete.countDown();
@@ -391,13 +420,44 @@ class WebsocketControllerTest {
     controller.testOnReceiveMessage(session, request);
 
     assertTrue(handlerComplete.await(5, TimeUnit.SECONDS), "Handler should complete");
-    assertTrue(sentMessages.size() >= 2, "Should have sent multiple streaming responses but got " + sentMessages.size());
+    assertTrue(resourceClosed.await(5, TimeUnit.SECONDS), "Streaming resource should close");
+    assertEquals(2, sentMessages.size());
+  }
+
+  @Test
+  void onReceiveMessage_explicitFlushPreservesStreamingBoundaries() throws Exception {
+    CountDownLatch resourceClosed = new CountDownLatch(1);
+    ManagedResource resource      = resourceClosed::countDown;
+
+    WebsocketHandler streamingHandler = (request, registry) ->
+        WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
+          output.write("token-one".getBytes());
+          output.flush();
+          output.write("token-two".getBytes());
+          output.flush();
+        });
+
+    controller.setRoutes(Map.of(new Route("GET", "/stream"), streamingHandler));
+    controller.testOnReceiveMessage(
+        session,
+        createProtobufRequest(1, "GET", "/stream", null));
+
+    assertTrue(resourceClosed.await(5, TimeUnit.SECONDS));
+    assertEquals(2, sentMessages.size());
   }
 
   @Test
   void onReceiveMessage_streamingResponseThrowsIOException_sendsError() throws Exception {
+    CountDownLatch resourceClosed = new CountDownLatch(1);
+    CountDownLatch responseSent   = new CountDownLatch(1);
+    ManagedResource resource      = resourceClosed::countDown;
+    doAnswer(invocation -> {
+      responseSent.countDown();
+      return null;
+    }).when(basicRemote).sendBinary(any(ByteBuffer.class));
+
     WebsocketHandler streamingHandler = (request, registry) -> {
-      return new WebsocketHandlerResponse.StreamingResponse(output -> {
+      return WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
         throw new IOException("Write failed");
       });
     };
@@ -409,9 +469,8 @@ class WebsocketControllerTest {
     byte[] request = createProtobufRequest(1, "GET", "/stream", null);
     controller.testOnReceiveMessage(session, request);
 
-    Thread.sleep(100);
-
-    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+    assertTrue(resourceClosed.await(5, TimeUnit.SECONDS), "Failed streaming resource should close");
+    assertTrue(responseSent.await(5, TimeUnit.SECONDS), "Should have sent an error response");
   }
 
   @Test
@@ -516,6 +575,23 @@ class WebsocketControllerTest {
 
     void testOnClose(Session session, CloseReason closeReason) {
       onClose(session, closeReason);
+    }
+
+    void testInitializeRoutes() {
+      initializeRoutes();
+    }
+
+    WebsocketHandler handlerFor(Route route) {
+      try {
+        java.lang.reflect.Field routesField = WebsocketController.class.getDeclaredField("routes");
+        routesField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<Route, WebsocketHandler> actualRoutes =
+            (Map<Route, WebsocketHandler>) routesField.get(this);
+        return actualRoutes.get(route);
+      } catch (ReflectiveOperationException error) {
+        throw new IllegalStateException("Failed to read routes", error);
+      }
     }
   }
 }

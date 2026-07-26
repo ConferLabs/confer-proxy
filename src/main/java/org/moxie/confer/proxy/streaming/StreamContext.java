@@ -12,14 +12,15 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class StreamContext {
 
-  private static final int  MAX_OUT_OF_ORDER_CHUNKS = 64;
-  private static final long MAX_TOTAL_BYTES         = 50 * 1024 * 1024; // 50 MB
+  private static final int  MAX_OUT_OF_ORDER_CHUNKS = 256;
+  private static final long DEFAULT_MAX_TOTAL_BYTES = 50L * 1024 * 1024;
 
   private final SortedMap<Integer, PendingChunk> pendingChunks = new TreeMap<>();
   private final ReentrantLock                    lock          = new ReentrantLock();
 
   private final long         requestId;
   private final OutputStream sink;
+  private final long         maximumBytes;
 
   private volatile boolean completed         = false;
   private          int     nextExpectedSeq   = 0;
@@ -28,8 +29,13 @@ public class StreamContext {
   private record PendingChunk(byte[] data, boolean isFinal) {}
 
   public StreamContext(long requestId, OutputStream sink) {
-    this.requestId = requestId;
-    this.sink      = sink;
+    this(requestId, sink, DEFAULT_MAX_TOTAL_BYTES);
+  }
+
+  StreamContext(long requestId, OutputStream sink, long maximumBytes) {
+    this.requestId    = requestId;
+    this.sink         = sink;
+    this.maximumBytes = maximumBytes;
   }
 
   /**
@@ -68,8 +74,8 @@ public class StreamContext {
 
       do {
         totalBytesWritten += current.data().length;
-        if (totalBytesWritten > MAX_TOTAL_BYTES) {
-          throw new IOException("Stream " + requestId + " exceeded maximum size of " + MAX_TOTAL_BYTES + " bytes");
+        if (totalBytesWritten > maximumBytes) {
+          throw new IOException("Stream " + requestId + " exceeded maximum size of " + maximumBytes + " bytes");
         }
         sink.write(current.data());
         nextExpectedSeq++;

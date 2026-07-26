@@ -1,4 +1,4 @@
-package org.moxie.confer.proxy.tools;
+package org.moxie.confer.proxy.tools.web;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -8,13 +8,17 @@ import com.openai.models.FunctionParameters;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.moxie.confer.proxy.services.TavilySearchService;
+import org.moxie.confer.proxy.tools.Tool;
+import org.moxie.confer.proxy.tools.ToolExecutionContext;
+import org.moxie.confer.proxy.tools.ToolRequirement;
+import org.moxie.confer.proxy.tools.ToolResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class WebSearchTool implements Tool {
@@ -55,20 +59,20 @@ public class WebSearchTool implements Tool {
   }
 
   @Override
-  public boolean hasExternalRequests() {
-    return true;
+  public Set<ToolRequirement> getRequirements() {
+    return Set.of(ToolRequirement.WEB_ACCESS);
   }
 
   @Override
-  public String execute(String arguments, String toolCallId, OutputStream output) {
+  public ToolResult execute(String arguments, ToolExecutionContext context) {
     try {
       String                             query          = parseSearchQuery(arguments);
       TavilySearchService.SearchResponse searchResponse = tavilySearch.search(query);
 
-      return formatSearchResults(query, searchResponse);
+      return ToolResult.text(formatSearchResults(query, searchResponse));
     } catch (IOException e) {
       log.error("Error executing web search", e);
-      return "Error executing web search: " + e.getMessage();
+      return ToolResult.text("Error executing web search: " + e.getMessage());
     }
   }
 

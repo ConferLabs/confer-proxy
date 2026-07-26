@@ -1,0 +1,1 @@
+"""Bounded visual-region rendering."""

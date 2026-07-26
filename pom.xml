@@ -20,6 +20,7 @@
         <mainClass>org.moxie.confer.proxy.Server</mainClass>
         <module.contentSha>unknown</module.contentSha>
         <s3.bucket>${env.S3_BUCKET}</s3.bucket>
+        <document.worker.python>python3.12</document.worker.python>
     </properties>
 
     <dependencyManagement>
@@ -73,6 +74,11 @@
         <dependency>
             <groupId>io.helidon.microprofile.websocket</groupId>
             <artifactId>helidon-microprofile-websocket</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.helidon.microprofile.bean-validation</groupId>
+            <artifactId>helidon-microprofile-bean-validation</artifactId>
         </dependency>
 
         <dependency>
@@ -361,6 +367,48 @@
                         <version>3.1.0</version>
                         <executions>
                             <execution>
+                                <id>build-document-worker-runtime</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${document.worker.python}</executable>
+                                    <arguments>
+                                        <argument>-m</argument>
+                                        <argument>pip</argument>
+                                        <argument>install</argument>
+                                        <argument>--disable-pip-version-check</argument>
+                                        <argument>--no-compile</argument>
+                                        <argument>--no-deps</argument>
+                                        <argument>--only-binary=:all:</argument>
+                                        <argument>--require-hashes</argument>
+                                        <argument>--requirement</argument>
+                                        <argument>${project.basedir}/document-worker/requirements-runtime.txt</argument>
+                                        <argument>--target</argument>
+                                        <argument>${project.build.directory}/document-worker/runtime</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>verify-document-worker-runtime</id>
+                                <phase>prepare-package</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>${document.worker.python}</executable>
+                                    <environmentVariables>
+                                        <PYTHONPATH>${project.build.directory}/document-worker/runtime${path.separator}${project.basedir}/document-worker/src</PYTHONPATH>
+                                    </environmentVariables>
+                                    <arguments>
+                                        <argument>-S</argument>
+                                        <argument>-c</argument>
+                                        <argument>from confer_document_worker.application import WorkerApplication; from docling.backend.msword_backend import MsWordDocumentBackend; from docling.backend.mspowerpoint_backend import MsPowerpointDocumentBackend; from docling.backend.msexcel_backend import MsExcelDocumentBackend</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                            <execution>
                                 <id>upload-proxy-zip</id>
                                 <phase>package</phase>
                                 <goals>
@@ -383,4 +431,3 @@
         </profile>
     </profiles>
 </project>
-
