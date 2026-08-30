@@ -12,6 +12,8 @@ import org.moxie.confer.proxy.tools.documents.FileSearchTool;
 import org.moxie.confer.proxy.tools.documents.FileViewTool;
 import org.moxie.confer.proxy.tools.web.PageFetchTool;
 import org.moxie.confer.proxy.tools.web.WebSearchTool;
+import org.moxie.confer.proxy.tools.workers.ExecCommandTool;
+import org.moxie.confer.proxy.tools.workers.PublishFileTool;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -36,6 +38,12 @@ class ToolRegistryTest {
   private PageFetchTool pageFetch;
 
   @Mock
+  private ExecCommandTool execCommand;
+
+  @Mock
+  private PublishFileTool publishFile;
+
+  @Mock
   private FileOverviewTool fileOverview;
 
   @Mock
@@ -55,6 +63,10 @@ class ToolRegistryTest {
     lenient().when(webSearch.getRequirements()).thenReturn(Set.of(ToolRequirement.WEB_ACCESS));
     when(pageFetch.getName()).thenReturn("page_fetch");
     lenient().when(pageFetch.getRequirements()).thenReturn(Set.of(ToolRequirement.WEB_ACCESS));
+    when(execCommand.getName()).thenReturn("exec_command");
+    lenient().when(execCommand.getRequirements()).thenReturn(Set.of());
+    when(publishFile.getName()).thenReturn("publish_file");
+    lenient().when(publishFile.getRequirements()).thenReturn(Set.of());
     when(fileOverview.getName()).thenReturn("file_overview");
     lenient().when(fileOverview.getRequirements()).thenReturn(Set.of(ToolRequirement.DOCUMENTS));
     when(fileSearch.getName()).thenReturn("file_search");
@@ -66,6 +78,8 @@ class ToolRegistryTest {
     registry = new ToolRegistry(
         webSearch,
         pageFetch,
+        execCommand,
+        publishFile,
         fileOverview,
         fileSearch,
         fileRead,
@@ -73,10 +87,10 @@ class ToolRegistryTest {
   }
 
   @Test
-  void forRequest_excludesToolsWithUnsatisfiedRequirements() {
+  void forRequest_includesUnconditionalToolsAndExcludesUnsatisfiedRequirements() {
     RequestToolSet tools = registry.forRequest(new ToolEligibility(Set.of()));
 
-    assertTrue(tools.values().isEmpty());
+    assertEquals(List.of(execCommand, publishFile), tools.values());
     assertFalse(tools.contains("web_search"));
     assertFalse(tools.contains("file_search"));
     assertTrue(tools.find("web_search").isEmpty());
@@ -90,7 +104,15 @@ class ToolRegistryTest {
             ToolRequirement.DOCUMENTS)));
 
     assertEquals(
-        List.of(webSearch, pageFetch, fileOverview, fileSearch, fileRead, fileView),
+        List.of(
+            webSearch,
+            pageFetch,
+            execCommand,
+            publishFile,
+            fileOverview,
+            fileSearch,
+            fileRead,
+            fileView),
         tools.values());
     assertSame(fileSearch, tools.find("file_search").orElseThrow());
   }
@@ -105,6 +127,8 @@ class ToolRegistryTest {
         () -> new ToolRegistry(
             webSearch,
             pageFetch,
+            execCommand,
+            publishFile,
             duplicate,
             fileSearch,
             fileRead,
@@ -122,6 +146,8 @@ class ToolRegistryTest {
         () -> new ToolRegistry(
             webSearch,
             pageFetch,
+            execCommand,
+            publishFile,
             fileOverview,
             fileSearch,
             fileRead,

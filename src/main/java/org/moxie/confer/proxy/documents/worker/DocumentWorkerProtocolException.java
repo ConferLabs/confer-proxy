@@ -2,7 +2,7 @@ package org.moxie.confer.proxy.documents.worker;
 
 import java.io.IOException;
 
-public final class DocumentWorkerProtocolException extends IOException {
+public class DocumentWorkerProtocolException extends IOException {
 
   public DocumentWorkerProtocolException(String message) {
     super(message);

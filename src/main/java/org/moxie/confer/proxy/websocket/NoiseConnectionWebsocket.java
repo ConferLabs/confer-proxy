@@ -38,7 +38,7 @@ public abstract class NoiseConnectionWebsocket {
   private boolean        serverPayloadSent;
 
   private enum Phase {HANDSHAKE, ESTABLISHED, FAILED};
-  private Phase phase =  Phase.HANDSHAKE;
+  private volatile Phase phase = Phase.HANDSHAKE;
 
   protected NoiseConnectionWebsocket(AttestationService attestationService, ObjectMapper mapper)
   {
@@ -188,7 +188,7 @@ public abstract class NoiseConnectionWebsocket {
 
   protected abstract void onReceiveMessage(Session session, byte[] data);
 
-  protected void sendMessage(Session session, byte[] data) {
+  protected void sendMessage(Session session, byte[] data) throws IOException {
     sendLock.lock();
     try {
       // 1. Framing layer: split into frames
@@ -205,6 +205,12 @@ public abstract class NoiseConnectionWebsocket {
       throw new AssertionError(e);
     } catch (IOException e) {
       log.warn("Failed to send encrypted message", e);
+      phase = Phase.FAILED;
+      closeQuiet(
+          session,
+          CloseReason.CloseCodes.UNEXPECTED_CONDITION,
+          "Encrypted send failed");
+      throw e;
     } finally {
       sendLock.unlock();
     }

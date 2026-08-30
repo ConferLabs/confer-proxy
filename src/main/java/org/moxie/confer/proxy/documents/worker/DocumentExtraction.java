@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Objects;
 
-public final class DocumentExtraction implements ManagedResource {
+public class DocumentExtraction implements ManagedResource {
 
   private final DocumentWorkerLease        worker;
   private final DocumentExtractionResponse response;

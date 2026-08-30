@@ -136,23 +136,24 @@ class StreamRegistryTest {
     StreamContext ctx1 = registry.createStream(1L, sink1);
     StreamContext ctx2 = registry.createStream(2L, sink2);
 
-    registry.cancelAll();
+    registry.close();
 
     assertTrue(ctx1.isCompleted());
     assertTrue(ctx2.isCompleted());
   }
 
   @Test
-  void cancelAll_clearsPendingChunks() throws IOException {
+  void closeRejectsNewStreamsAndPendingChunks() throws IOException {
     // Buffer some chunks
     registry.handleChunk(1L, "pending".getBytes(), 0, false);
 
-    registry.cancelAll();
+    registry.close();
 
-    // Creating stream should have no pending chunks
     ByteArrayOutputStream sink = new ByteArrayOutputStream();
-    registry.createStream(1L, sink);
-    assertEquals(0, sink.size());
+    assertThrows(IOException.class, () -> registry.createStream(1L, sink));
+    assertThrows(
+        IOException.class,
+        () -> registry.handleChunk(1L, "late".getBytes(), 1, true));
   }
 
   @Test
@@ -164,7 +165,7 @@ class StreamRegistryTest {
     ctx.complete();
 
     // Should not throw or fail
-    registry.cancelAll();
+    registry.close();
 
     assertTrue(ctx.isCompleted());
   }
@@ -238,5 +239,25 @@ class StreamRegistryTest {
     registry.handleChunk(1L, "new data".getBytes(), 0, true);
 
     assertEquals("new data", sink2.toString());
+  }
+
+  @Test
+  void completedOldStreamCannotRemoveItsReplacement() throws IOException {
+    ByteArrayOutputStream replacementSink = new ByteArrayOutputStream();
+    ByteArrayOutputStream firstSink = new ByteArrayOutputStream() {
+      @Override
+      public void close() throws IOException {
+        super.close();
+        registry.cancelStream(1L);
+        registry.createStream(1L, replacementSink);
+      }
+    };
+    registry.createStream(1L, firstSink);
+
+    registry.handleChunk(1L, "old".getBytes(), 0, true);
+    registry.handleChunk(1L, "new".getBytes(), 0, true);
+
+    assertEquals("old", firstSink.toString());
+    assertEquals("new", replacementSink.toString());
   }
 }

@@ -7,6 +7,7 @@ import jakarta.websocket.HandshakeResponse;
 import jakarta.websocket.server.HandshakeRequest;
 import jakarta.websocket.server.ServerEndpointConfig;
 import org.moxie.confer.proxy.config.Config;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 
 import java.time.Instant;
 import java.util.List;
@@ -44,11 +45,18 @@ public class WebsocketAuthenticator extends ServerEndpointConfig.Configurator {
     }
 
     try {
-      DecodedJWT decoded    = jwt().verify(token.get());
-      Instant    expiry     = decoded.getExpiresAtAsInstant();
-      Boolean    subscribed = decoded.getClaim("subscribed").asBoolean();
-      sec.getUserProperties().put("tokenExpiry", expiry);
-      sec.getUserProperties().put("subscribed", subscribed != null ? subscribed : false);
+      DecodedJWT decoded          = jwt().verify(token.get());
+      Instant    expiry           = decoded.getExpiresAtAsInstant();
+      Boolean    subscribed       = decoded.getClaim("subscribed").asBoolean();
+      String     attachmentPrefix = decoded.getSubject();
+
+      if (expiry == null || attachmentPrefix == null || attachmentPrefix.isBlank()) {
+        rejectHandshake(resp, "Invalid token");
+        return;
+      }
+
+      WebsocketConnectionContext context = new WebsocketConnectionContext(attachmentPrefix, expiry, subscribed != null && subscribed);
+      sec.getUserProperties().put(WebsocketConnectionContext.SESSION_PROPERTY, context);
     } catch (JWTVerificationException e) {
       rejectHandshake(resp, "Invalid token");
     }

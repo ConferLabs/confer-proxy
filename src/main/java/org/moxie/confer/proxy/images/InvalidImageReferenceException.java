@@ -1,6 +1,6 @@
 package org.moxie.confer.proxy.images;
 
-public final class InvalidImageReferenceException extends Exception {
+public class InvalidImageReferenceException extends Exception {
 
   public InvalidImageReferenceException(String message) {
     super(message);

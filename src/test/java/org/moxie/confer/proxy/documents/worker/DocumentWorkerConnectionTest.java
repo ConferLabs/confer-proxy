@@ -57,7 +57,8 @@ class DocumentWorkerConnectionTest {
       "application/pdf",
       ARTIFACT.length,
       "objects/document",
-      KEY);
+      KEY,
+      null);
 
   private static ValidatorFactory validatorFactory;
 

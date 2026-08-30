@@ -23,7 +23,7 @@ import java.util.Base64;
 import java.util.Objects;
 
 @ApplicationScoped
-public class S3DocumentStorageGateway implements DocumentStorageGateway, DocumentDerivedStorage {
+public class S3DocumentStorageGateway implements DocumentStorageGateway, DocumentStorageWriter {
 
   private static final long   MAX_ENCRYPTED_BYTES = 320L * 1024 * 1024;
   private static final String PENDING_TAGGING     = "status=pending";
@@ -62,11 +62,15 @@ public class S3DocumentStorageGateway implements DocumentStorageGateway, Documen
   }
 
   @Override
-  public void store(String objectKey,
+  public long store(String objectKey,
                     String encryptionKey,
-                    InputStream content)
+                    InputStream content,
+                    long maximumBytes)
     throws IOException
   {
+    if (maximumBytes < 0) {
+      throw new IOException("Plaintext size limit is invalid");
+    }
     validateObjectKey(objectKey);
     Objects.requireNonNull(content, "content");
     SecretKey key = encryptionKey(encryptionKey);
@@ -79,7 +83,7 @@ public class S3DocumentStorageGateway implements DocumentStorageGateway, Documen
                                                .build();
 
     try (S3DocumentUpload upload = new S3DocumentUpload(asyncS3, request)) {
-      upload.write(content, key);
+      return upload.write(content, key, maximumBytes);
     }
   }
 

@@ -6,26 +6,19 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.validation.Validator;
 import jakarta.ws.rs.WebApplicationException;
-import org.moxie.confer.proxy.documents.DecryptedDocument;
 import org.moxie.confer.proxy.documents.DocumentDescriptor;
-import org.moxie.confer.proxy.documents.DocumentDerivedStorage;
+import org.moxie.confer.proxy.documents.DocumentLengthMismatchException;
 import org.moxie.confer.proxy.documents.DocumentNotFoundException;
 import org.moxie.confer.proxy.documents.DocumentObjectKeys;
-import org.moxie.confer.proxy.documents.DocumentStorageGateway;
 import org.moxie.confer.proxy.documents.UnsupportedDocumentTypeException;
-import org.moxie.confer.proxy.documents.extraction.DocumentExtractionWriter;
+import org.moxie.confer.proxy.documents.extraction.StoredDocumentExtractor;
 import org.moxie.confer.proxy.documents.requests.DocumentExtractionRequest;
 import org.moxie.confer.proxy.documents.responses.DocumentExtractionResult;
-import org.moxie.confer.proxy.documents.worker.DocumentExtraction;
 import org.moxie.confer.proxy.documents.worker.DocumentExtractionRejectedException;
-import org.moxie.confer.proxy.documents.worker.DocumentWorkerPayloadRole;
-import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
 import org.moxie.confer.proxy.documents.worker.DocumentWorkerTimeoutException;
-import org.moxie.confer.proxy.documents.worker.requests.DocumentWorkerRequestPayload;
-import org.moxie.confer.proxy.documents.worker.requests.ExtractDocumentRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.storage.InvalidObjectStorageKeyException;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 import org.slf4j.Logger;
@@ -49,16 +42,12 @@ public class DocumentExtractionHandler implements WebsocketHandler {
   Validator validator;
 
   @Inject
-  DocumentStorageGateway storage;
-
-  @Inject
-  DocumentDerivedStorage derivedStorage;
-
-  @Inject
-  DocumentWorkerScheduler workers;
+  StoredDocumentExtractor extractor;
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry registry) {
+  public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
+                                         WebsocketRequest           request)
+  {
     if (request.chunk().isPresent()) {
       throw new WebApplicationException("Stored document extraction must not contain file data", 400);
     }
@@ -93,30 +82,7 @@ public class DocumentExtractionHandler implements WebsocketHandler {
                                            int inlineTextMaxCharacters)
   {
     try {
-      try (DocumentExtraction extraction = workers.extract(connection -> {
-        try (DecryptedDocument source = storage.open(objectKeys.source(), options.encryptionKey())) {
-
-          if (source.length() != document.totalLength()) {
-            throw new WebApplicationException("Stored document length does not match", 422);
-          }
-
-          DocumentWorkerRequestPayload sourcePayload = new DocumentWorkerRequestPayload(DocumentWorkerPayloadRole.SOURCE,
-                                                                                        document.mediaType(),
-                                                                                        source.length(),
-                                                                                        source.content());
-
-          return connection.extract(new ExtractDocumentRequest(document.filename(),
-                                                               document.mediaType(),
-                                                               sourcePayload));
-        }
-      })) {
-        return new DocumentExtractionWriter(
-            derivedStorage,
-            objectKeys,
-            options.encryptionKey(),
-            inlineTextMaxCharacters,
-            extraction).persist();
-      }
+      return extractor.extract(document, objectKeys, options.encryptionKey(), inlineTextMaxCharacters);
     } catch (DocumentWorkerTimeoutException error) {
       throw new WebApplicationException(error.getMessage(), 503);
     } catch (DocumentExtractionRejectedException error) {
@@ -124,6 +90,8 @@ public class DocumentExtractionHandler implements WebsocketHandler {
       throw new WebApplicationException("Document extraction failed", 422);
     } catch (DocumentNotFoundException error) {
       throw new WebApplicationException("Stored document was not found", 422);
+    } catch (DocumentLengthMismatchException error) {
+      throw new WebApplicationException(error.getMessage(), 422);
     } catch (IOException error) {
       log.warn("Stored document extraction failed", error);
       throw new WebApplicationException("Document extraction failed", 502);

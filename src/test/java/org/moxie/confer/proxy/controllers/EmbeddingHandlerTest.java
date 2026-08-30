@@ -10,7 +10,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.services.EmbeddingService;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
 import java.lang.reflect.Field;
@@ -29,12 +28,10 @@ class EmbeddingHandlerTest {
 
   private ObjectMapper mapper;
   private EmbeddingHandler handler;
-  private StreamRegistry streamRegistry;
 
   @BeforeEach
   void setUp() throws Exception {
     mapper = new ObjectMapper();
-    streamRegistry = new StreamRegistry();
 
     handler = new EmbeddingHandler();
 
@@ -49,7 +46,7 @@ class EmbeddingHandlerTest {
     when(embeddingService.getDimension()).thenReturn(768);
 
     WebsocketRequest request = createRequest("{\"texts\": [\"hello world\"]}");
-    WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
+    WebsocketHandlerResponse response = handler.handle(null, request);
 
     assertInstanceOf(WebsocketHandlerResponse.SingleResponse.class, response);
     WebsocketHandlerResponse.SingleResponse single = (WebsocketHandlerResponse.SingleResponse) response;
@@ -68,7 +65,7 @@ class EmbeddingHandlerTest {
 
     WebsocketRequest request = createRequest("{\"texts\": [\"fact one\", \"fact two\"]}");
     WebsocketHandlerResponse.SingleResponse single =
-        (WebsocketHandlerResponse.SingleResponse) handler.handle(request, streamRegistry);
+        (WebsocketHandlerResponse.SingleResponse) handler.handle(null, request);
 
     assertEquals(200, single.statusCode());
 
@@ -85,7 +82,7 @@ class EmbeddingHandlerTest {
 
     WebsocketRequest request = createRequest("{\"texts\": [\"search term\"], \"isQuery\": true}");
     WebsocketHandlerResponse.SingleResponse single =
-        (WebsocketHandlerResponse.SingleResponse) handler.handle(request, streamRegistry);
+        (WebsocketHandlerResponse.SingleResponse) handler.handle(null, request);
 
     assertEquals(200, single.statusCode());
   }
@@ -98,7 +95,7 @@ class EmbeddingHandlerTest {
 
     WebsocketRequest request = createRequest("{\"texts\": [\"a fact\"], \"isQuery\": false}");
     WebsocketHandlerResponse.SingleResponse single =
-        (WebsocketHandlerResponse.SingleResponse) handler.handle(request, streamRegistry);
+        (WebsocketHandlerResponse.SingleResponse) handler.handle(null, request);
 
     assertEquals(200, single.statusCode());
   }
@@ -111,7 +108,7 @@ class EmbeddingHandlerTest {
 
     WebsocketRequest request = createRequest("{\"texts\": [\"a fact\"]}");
     WebsocketHandlerResponse.SingleResponse single =
-        (WebsocketHandlerResponse.SingleResponse) handler.handle(request, streamRegistry);
+        (WebsocketHandlerResponse.SingleResponse) handler.handle(null, request);
 
     assertEquals(200, single.statusCode());
   }
@@ -121,7 +118,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = createRequest("{\"texts\": []}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -130,7 +127,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = createRequest("{\"isQuery\": true}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -139,7 +136,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/embeddings", Optional.empty());
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -148,7 +145,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = createRequest("not json at all");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -162,7 +159,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = createRequest(json);
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -173,7 +170,7 @@ class EmbeddingHandlerTest {
     WebsocketRequest request = createRequest("{\"texts\": [\"hello\"]}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(500, exception.getResponse().getStatus());
   }
 

@@ -32,13 +32,14 @@ import org.moxie.confer.proxy.entities.DocumentReference;
 import org.moxie.confer.proxy.images.ImageReference;
 import org.moxie.confer.proxy.images.TemporaryImageStorage;
 import org.moxie.confer.proxy.util.Result;
+import org.moxie.confer.proxy.workers.WorkerInputSource;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Gatherers;
 
-public class DocumentToolSession {
+public class DocumentToolSession implements WorkerInputSource {
 
   private static final String LEGACY_WARNING =
       "This older attachment uses its extracted-text fallback; visual pages are unavailable.";
@@ -54,20 +55,33 @@ public class DocumentToolSession {
   private final DocumentManifest        manifest;
   private final DocumentWorkerScheduler workers;
   private final TemporaryImageStorage   images;
+  private final DocumentStorageGateway  storage;
 
   DocumentToolSession(DocumentManifest manifest,
                       DocumentWorkerScheduler workers,
-                      TemporaryImageStorage images)
+                      TemporaryImageStorage images,
+                      DocumentStorageGateway storage)
   {
     this.manifest = manifest;
     this.workers  = workers;
     this.images   = images;
+    this.storage  = storage;
+  }
+
+  @Override
+  public DecryptedDocument open(String attachmentId) throws IOException {
+    try {
+      DocumentReference reference = manifest.reference(attachmentId);
+      return storage.open(reference.sourceObjectKey(), reference.encryptionKey());
+    } catch (DocumentAccessException error) {
+      throw new IOException("Attachment is unavailable", error);
+    }
   }
 
   public DocumentOverviewResult overview(DocumentOverviewRequest request)
     throws IOException, DocumentAccessException
   {
-    DocumentReference reference = manifest.reference(request.attachmentId());
+    DocumentReference reference = getExtractedReference(request.attachmentId());
 
     try (DocumentWorkerLease worker = workers.acquire()) {
       DocumentWorkerConnection connection = worker.connection();
@@ -102,13 +116,16 @@ public class DocumentToolSession {
   {
     if (request.attachmentId() != null) {
       return searchDocument(
-          manifest.reference(request.attachmentId()),
+          getExtractedReference(request.attachmentId()),
           request.queries(),
           TARGETED_SEARCH_SNIPPET_CHARACTERS);
     }
 
     return searchAll(
-        manifest.values(),
+        manifest.values()
+                .stream()
+                .filter(DocumentReference::supportsDocumentTools)
+                .toList(),
         request.queries(),
         COLLECTION_SEARCH_SNIPPET_CHARACTERS);
   }
@@ -116,7 +133,7 @@ public class DocumentToolSession {
   public DocumentReadResult read(DocumentReadRequest request)
     throws IOException, DocumentAccessException
   {
-    DocumentReference reference = manifest.reference(request.attachmentId());
+    DocumentReference reference = getExtractedReference(request.attachmentId());
 
     try (DocumentWorkerLease worker = workers.acquire()) {
       DocumentWorkerConnection connection = worker.connection();
@@ -148,7 +165,7 @@ public class DocumentToolSession {
   public DocumentPageViewResult viewPage(DocumentPageViewRequest request)
     throws IOException, DocumentAccessException
   {
-    DocumentReference    reference = manifest.reference(request.attachmentId());
+    DocumentReference    reference = getExtractedReference(request.attachmentId());
     RenderedDocumentPage rendered  = renderPage(
         reference,
         request.pageNumber() - 1);
@@ -175,6 +192,16 @@ public class DocumentToolSession {
     try (DocumentWorkerLease worker = workers.acquire()) {
       return worker.connection().renderPage(reference, pageNumber);
     }
+  }
+
+  private DocumentReference getExtractedReference(String attachmentId)
+      throws DocumentAccessException
+  {
+    DocumentReference reference = manifest.reference(attachmentId);
+    if (!reference.supportsDocumentTools()) {
+      throw new DocumentAccessException("Unknown attachment_id");
+    }
+    return reference;
   }
 
   private DocumentSearchDocumentResult searchDocument(DocumentReference reference,

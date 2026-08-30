@@ -3,7 +3,7 @@ package org.moxie.confer.proxy.documents.worker;
 import java.io.IOException;
 import java.util.Objects;
 
-public final class DocumentWorkerLease implements AutoCloseable {
+public class DocumentWorkerLease implements AutoCloseable {
 
   private final DocumentWorkerConnection connection;
   private final DocumentWorkerScheduler  scheduler;

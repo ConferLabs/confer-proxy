@@ -1,6 +1,7 @@
 package org.moxie.confer.proxy.websocket;
 
 import com.southernstorm.noise.protocol.CipherState;
+import jakarta.websocket.CloseReason;
 import jakarta.websocket.RemoteEndpoint;
 import jakarta.websocket.Session;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,8 +11,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import javax.crypto.ShortBufferException;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -19,6 +22,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -116,6 +120,86 @@ class NoiseConnectionWebsocketTest {
   }
 
   @Test
+  void sendMessage_concurrentMultiframeMessagesRemainContiguous()
+      throws Exception
+  {
+    byte[] firstMessage = new byte[200_000];
+    byte[] secondMessage = new byte[200_000];
+    Arrays.fill(firstMessage, (byte) 1);
+    Arrays.fill(secondMessage, (byte) 2);
+    CountDownLatch firstFrameSent = new CountDownLatch(1);
+    CountDownLatch releaseFirst = new CountDownLatch(1);
+    CountDownLatch secondStarted = new CountDownLatch(1);
+    AtomicInteger sends = new AtomicInteger();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    doAnswer(invocation -> {
+      ByteBuffer buffer = invocation.getArgument(0);
+      byte[] copy = new byte[buffer.remaining()];
+      buffer.get(copy);
+      sentMessages.add(ByteBuffer.wrap(copy));
+      if (sends.getAndIncrement() == 0) {
+        firstFrameSent.countDown();
+        assertTrue(releaseFirst.await(1, TimeUnit.SECONDS));
+      }
+      return null;
+    }).when(basicRemote).sendBinary(any(ByteBuffer.class));
+    Thread first = Thread.ofPlatform().start(() -> send(
+        websocket,
+        session,
+        firstMessage,
+        failure));
+    assertTrue(firstFrameSent.await(1, TimeUnit.SECONDS));
+    Thread second = Thread.ofPlatform().start(() -> {
+      secondStarted.countDown();
+      send(websocket, session, secondMessage, failure);
+    });
+    assertTrue(secondStarted.await(1, TimeUnit.SECONDS));
+    awaitWaiting(second);
+
+    try {
+      assertEquals(1, sentMessages.size());
+    } finally {
+      releaseFirst.countDown();
+    }
+    first.join(TimeUnit.SECONDS.toMillis(1));
+    second.join(TimeUnit.SECONDS.toMillis(1));
+
+    assertFalse(first.isAlive());
+    assertFalse(second.isAlive());
+    assertNull(failure.get());
+    NoiseTransportFramer.FrameAssembler assembler =
+        new NoiseTransportFramer.FrameAssembler();
+    List<byte[]> completeMessages = new ArrayList<>();
+    long firstChunkId = 0;
+    int firstChunkCount = 0;
+    for (int index = 0; index < sentMessages.size(); index++) {
+      ByteBuffer encrypted = sentMessages.get(index).duplicate();
+      byte[] frame = new byte[encrypted.remaining() - 16];
+      encrypted.get(frame);
+      confer.NoiseTransport.NoiseTransportFrame decoded =
+          NoiseTransportFramer.decodeFrame(frame);
+      if (index == 0) {
+        firstChunkId = decoded.getChunkId();
+        firstChunkCount = decoded.getTotalChunks();
+      }
+      if (index < firstChunkCount) {
+        assertEquals(firstChunkId, decoded.getChunkId());
+        assertEquals(index, decoded.getChunkIndex());
+      } else {
+        assertNotEquals(firstChunkId, decoded.getChunkId());
+        assertEquals(index - firstChunkCount, decoded.getChunkIndex());
+      }
+      byte[] complete = assembler.processFrame(decoded);
+      if (complete != null) {
+        completeMessages.add(complete);
+      }
+    }
+    assertEquals(2, completeMessages.size());
+    assertArrayEquals(firstMessage, completeMessages.get(0));
+    assertArrayEquals(secondMessage, completeMessages.get(1));
+  }
+
+  @Test
   void sendMessage_singleMessage_sendsCorrectly() throws Exception {
     byte[] testData = "Hello, World!".getBytes();
 
@@ -160,6 +244,22 @@ class NoiseConnectionWebsocketTest {
     verify(mockCipher, atLeastOnce()).encryptWithAd(isNull(), any(byte[].class), anyInt(), any(byte[].class), anyInt(), anyInt());
   }
 
+  @Test
+  void sendMessage_propagatesTransportFailureAndClosesTheSession()
+      throws Exception
+  {
+    when(session.isOpen()).thenReturn(true);
+    doThrow(new IOException("connection closed"))
+        .when(basicRemote)
+        .sendBinary(any(ByteBuffer.class));
+
+    assertThrows(
+        IOException.class,
+        () -> websocket.testSendMessage(session, "artifact".getBytes()));
+
+    verify(session).close(any(CloseReason.class));
+  }
+
   /**
    * Testable subclass that exposes sendMessage and allows injecting mock cipher
    */
@@ -177,7 +277,7 @@ class NoiseConnectionWebsocketTest {
       }
     }
 
-    void testSendMessage(Session session, byte[] data) {
+    void testSendMessage(Session session, byte[] data) throws IOException {
       sendMessage(session, data);
     }
 
@@ -185,5 +285,26 @@ class NoiseConnectionWebsocketTest {
     protected void onReceiveMessage(Session session, byte[] data) {
       // Not used in these tests
     }
+  }
+
+  private static void send(TestableNoiseConnectionWebsocket websocket,
+                           Session                          session,
+                           byte[]                           message,
+                           AtomicReference<Throwable>       failure)
+  {
+    try {
+      websocket.testSendMessage(session, message);
+    } catch (Throwable error) {
+      failure.compareAndSet(null, error);
+    }
+  }
+
+  private static void awaitWaiting(Thread thread) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+    while (thread.getState() != Thread.State.WAITING
+        && System.nanoTime() < deadline) {
+      Thread.onSpinWait();
+    }
+    assertEquals(Thread.State.WAITING, thread.getState());
   }
 }

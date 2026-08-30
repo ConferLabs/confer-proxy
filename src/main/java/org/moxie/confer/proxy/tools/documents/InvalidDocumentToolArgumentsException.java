@@ -1,6 +1,6 @@
 package org.moxie.confer.proxy.tools.documents;
 
-public final class InvalidDocumentToolArgumentsException extends Exception {
+public class InvalidDocumentToolArgumentsException extends Exception {
 
   public InvalidDocumentToolArgumentsException(String message) {
     super(message);

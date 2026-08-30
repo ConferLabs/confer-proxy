@@ -14,9 +14,9 @@ import org.moxie.confer.proxy.documents.responses.DocumentPageViewContent;
 import org.moxie.confer.proxy.images.ImageReference;
 import org.moxie.confer.proxy.images.InvalidImageReferenceException;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
-import org.moxie.confer.proxy.tools.ToolImageAttachment;
 import org.moxie.confer.proxy.tools.ToolRequirement;
 import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.util.List;
 import java.util.Set;
@@ -36,12 +36,15 @@ class FileViewToolTest {
   @Mock
   private DocumentToolSession documentSession;
 
+  @Mock
+  private WorkerWorkspace workerWorkspace;
+
   private ToolExecutionContext context;
   private FileViewTool         tool;
 
   @BeforeEach
   void setUp() {
-    context = new ToolExecutionContext(documentSession);
+    context = new ToolExecutionContext(documentSession, workerWorkspace);
     tool = new FileViewTool(MAPPER);
   }
 
@@ -77,7 +80,7 @@ class FileViewToolTest {
     JsonNode content = MAPPER.readTree(result.modelContent());
 
     assertEquals(7, content.path("page_number").asInt());
-    assertEquals(List.of(new ToolImageAttachment(IMAGE)), result.attachments());
+    assertEquals(List.of(IMAGE), result.images());
     verify(documentSession).viewPage(request);
   }
 

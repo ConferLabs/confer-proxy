@@ -18,12 +18,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
 /**
- * One unknown-length, encrypted, multipart S3 upload.
+ * One encrypted multipart S3 upload.
  *
  * <p>Closing an incomplete upload cancels both its backpressured destination and
  * its asynchronous request. The plaintext input remains caller-owned.</p>
  */
-final class S3DocumentUpload implements AutoCloseable {
+class S3DocumentUpload implements AutoCloseable {
+
+  private static final int BUFFER_BYTES = 64 * 1024;
 
   private final CompletableFuture<PutObjectResponse> upload;
   private final CancellableOutputStream              destination;
@@ -45,7 +47,11 @@ final class S3DocumentUpload implements AutoCloseable {
     }
   }
 
-  void write(InputStream content, SecretKey key) throws IOException {
+  long write(InputStream content,
+             SecretKey   key,
+             long        maximumBytes)
+    throws IOException
+  {
     Objects.requireNonNull(content, "content");
     Objects.requireNonNull(key, "key");
 
@@ -57,10 +63,11 @@ final class S3DocumentUpload implements AutoCloseable {
 
     try {
       ChunkedCipherOutputStream encrypted = new ChunkedCipherOutputStream(destination, key);
-      content.transferTo(encrypted);
+      long plaintextBytes = transfer(content, encrypted, maximumBytes);
       encrypted.close();
       await();
       completed = true;
+      return plaintextBytes;
     } catch (SdkException error) {
       throw new IOException("Document storage is unavailable", error);
     } catch (CompletionException error) {
@@ -75,6 +82,24 @@ final class S3DocumentUpload implements AutoCloseable {
     }
     destination.cancel();
     upload.cancel(false);
+  }
+
+  private static long transfer(InputStream              content,
+                               ChunkedCipherOutputStream destination,
+                               long                     maximumBytes)
+    throws IOException
+  {
+    byte[] buffer = new byte[BUFFER_BYTES];
+    long size = 0;
+    int length;
+    while ((length = content.read(buffer)) != -1) {
+      if (length > maximumBytes - size) {
+        throw new IOException("Plaintext exceeds storage limit");
+      }
+      destination.write(buffer, 0, length);
+      size += length;
+    }
+    return size;
   }
 
   private void await() throws IOException {

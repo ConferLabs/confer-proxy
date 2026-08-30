@@ -18,6 +18,7 @@ import org.moxie.confer.proxy.documents.responses.DocumentSearchMatch;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
 import org.moxie.confer.proxy.tools.ToolRequirement;
 import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.util.List;
 import java.util.Set;
@@ -37,6 +38,9 @@ class FileSearchToolTest {
   @Mock
   private DocumentToolSession documentSession;
 
+  @Mock
+  private WorkerWorkspace workerWorkspace;
+
   private ToolExecutionContext context;
   private FileSearchTool       tool;
   private ValidatorFactory     validators;
@@ -44,7 +48,7 @@ class FileSearchToolTest {
   @BeforeEach
   void setUp() {
     validators = Validation.buildDefaultValidatorFactory();
-    context = new ToolExecutionContext(documentSession);
+    context = new ToolExecutionContext(documentSession, workerWorkspace);
     tool = new FileSearchTool(MAPPER, validators.getValidator());
   }
 

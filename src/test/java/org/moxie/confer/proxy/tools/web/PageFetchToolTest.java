@@ -10,6 +10,7 @@ import org.moxie.confer.proxy.documents.DocumentToolSession;
 import org.moxie.confer.proxy.services.TavilySearchService;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
 import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.util.List;
 
@@ -27,6 +28,9 @@ class PageFetchToolTest {
   @Mock
   private DocumentToolSession documentSession;
 
+  @Mock
+  private WorkerWorkspace workerWorkspace;
+
   @Test
   void returnsFullModelContentAndBoundedClientContent() throws Exception {
     ObjectMapper mapper = new ObjectMapper();
@@ -39,7 +43,7 @@ class PageFetchToolTest {
 
     ToolResult result = tool.execute(
         "{\"urls\":[\"https://example.com/article\"]}",
-        new ToolExecutionContext(documentSession));
+        new ToolExecutionContext(documentSession, workerWorkspace));
     JsonNode clientResult = mapper.readTree(result.clientContent());
 
     assertTrue(result.modelContent().contains(rawContent));
@@ -48,6 +52,6 @@ class PageFetchToolTest {
     assertEquals(
         rawContent.length(),
         clientResult.path("results").get(0).path("contentLength").asInt());
-    assertTrue(result.attachments().isEmpty());
+    assertTrue(result.images().isEmpty());
   }
 }

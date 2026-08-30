@@ -49,6 +49,16 @@ class DocumentDescriptorTest {
   }
 
   @Test
+  void infersGeneratedTextMediaTypesFromFilename() throws UnsupportedDocumentTypeException {
+    assertEquals(
+        "text/css",
+        new DocumentDescriptor("styles.css", null, 1L).mediaType());
+    assertEquals(
+        "text/javascript",
+        new DocumentDescriptor("script.js", null, 1L).mediaType());
+  }
+
+  @Test
   void rejectsUnsupportedContentType() {
     assertThrows(
         UnsupportedDocumentTypeException.class,

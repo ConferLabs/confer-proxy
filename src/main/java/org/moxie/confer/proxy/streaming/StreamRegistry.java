@@ -39,6 +39,8 @@ public class StreamRegistry {
     }
   };
 
+  private boolean closed;
+
   private record PendingChunk(byte[] data, int sequenceNumber, boolean isFinal) {}
 
   /**
@@ -62,19 +64,26 @@ public class StreamRegistry {
   }
 
   private StreamContext register(StreamContext ctx) throws IOException {
-    Queue<PendingChunk> pending;
+    Queue<PendingChunk> pending = null;
+    String              rejection;
 
     synchronized (lock) {
-      if (streams.size() >= MAX_ACTIVE_STREAMS) {
-        ctx.cancel();
-        throw new IOException("Too many active streams");
+      if (closed) {
+        rejection = "Stream registry is closed";
+      } else if (streams.size() >= MAX_ACTIVE_STREAMS) {
+        rejection = "Too many active streams";
+      } else if (streams.containsKey(ctx.getRequestId())) {
+        rejection = "Stream is already active";
+      } else {
+        rejection = null;
+        streams.put(ctx.getRequestId(), ctx);
+        pending = pendingChunks.remove(ctx.getRequestId());
       }
-      if (streams.containsKey(ctx.getRequestId())) {
-        ctx.cancel();
-        throw new IOException("Stream is already active");
-      }
-      streams.put(ctx.getRequestId(), ctx);
-      pending = pendingChunks.remove(ctx.getRequestId());
+    }
+
+    if (rejection != null) {
+      ctx.cancel();
+      throw new IOException(rejection);
     }
 
     try {
@@ -115,6 +124,10 @@ public class StreamRegistry {
     StreamContext ctx;
 
     synchronized (lock) {
+      if (closed) {
+        throw new IOException("Stream registry is closed");
+      }
+
       ctx = streams.get(requestId);
 
       if (ctx == null) {
@@ -135,9 +148,7 @@ public class StreamRegistry {
 
     // Remove from registry when stream completes
     if (ctx.isCompleted()) {
-      synchronized (lock) {
-        streams.remove(requestId);
-      }
+      remove(ctx);
     }
   }
 
@@ -158,12 +169,17 @@ public class StreamRegistry {
   }
 
   /**
-   * Cancel all streams (e.g., when WebSocket connection closes).
+   * Permanently close the registry and cancel every stream.
    */
-  public void cancelAll() {
+  public void close() {
     List<StreamContext> toCancel;
 
     synchronized (lock) {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
       pendingChunks.clear();
       toCancel = new ArrayList<>(streams.values());
       streams.clear();

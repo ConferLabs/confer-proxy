@@ -7,7 +7,6 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.UUID;
 
 public class JWT {
 
@@ -25,9 +24,9 @@ public class JWT {
     return verifier.verify(jwt);
   }
 
-  public String generate(UUID userId) {
+  public String generate(String subject) {
     return com.auth0.jwt.JWT.create()
-              .withSubject(userId.toString())
+              .withSubject(subject)
               .withIssuer("kerf")
               .withExpiresAt(Instant.now().plus(Duration.ofMinutes(15)))
               .sign(Algorithm.HMAC256(jwtSecret));

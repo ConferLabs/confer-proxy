@@ -54,9 +54,10 @@ class ChatRequestTest {
             "document-1",
             "example.pdf",
             "application/pdf",
-            1,
+            0,
             "namespace/document-1",
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")));
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            null)));
 
     assertTrue(validator.validate(request).isEmpty());
   }
@@ -115,7 +116,7 @@ class ChatRequestTest {
         null,
         null,
         List.of(new ChatRequest.ClientTool("", null, null)),
-        List.of(new DocumentReference("!", "", "", 0, "", "")));
+        List.of(new DocumentReference("!", "", "", -1, "", "", null)));
 
     assertEquals(
         Set.of(

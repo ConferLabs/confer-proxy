@@ -67,7 +67,7 @@ class S3DocumentStorageGatewayTest {
   }
 
   @Test
-  void streamsEncryptedContentToTheExactObjectKeyWithoutAKnownLength() throws Exception {
+  void streamsEncryptedContentToTheExactObjectKey() throws Exception {
     byte[] plaintext = new byte[2 * 1024 * 1024 + 17];
     Arrays.fill(plaintext, (byte) 7);
     AtomicReference<PutObjectRequest> request = new AtomicReference<>();
@@ -81,18 +81,77 @@ class S3DocumentStorageGatewayTest {
         });
     TrackingInputStream content = new TrackingInputStream(plaintext);
 
-    storage.store("opaque/attachment.artifact", KEY, content);
+    long storedBytes = storage.store(
+        "opaque/attachment.artifact",
+        KEY,
+        content);
 
+    assertEquals(plaintext.length, storedBytes);
     assertEquals("attachments", request.get().bucket());
     assertEquals("opaque/attachment.artifact", request.get().key());
     assertEquals("application/octet-stream", request.get().contentType());
     assertEquals("status=pending", request.get().tagging());
     assertTrue(body.get().contentLength().isEmpty());
     assertFalse(content.closed());
-    assertTrue(content.maximumRequestedRead() <= 8 * 1024);
+    assertTrue(content.maximumRequestedRead() <= 64 * 1024);
     assertArrayEquals(
         plaintext,
         new ChunkedCipher(KEY, DECRYPT).doFinal(encrypted.get()));
+  }
+
+  @Test
+  void acceptsContentAtTheLimit() throws Exception {
+    byte[] plaintext = new byte[] {1, 2, 3};
+    when(asyncS3.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+        .thenAnswer(invocation -> consume(
+            invocation.getArgument(1),
+            new AtomicReference<>()));
+
+    long storedBytes = storage.store(
+        "opaque/attachment",
+        KEY,
+        new ByteArrayInputStream(plaintext),
+        plaintext.length);
+
+    assertEquals(plaintext.length, storedBytes);
+  }
+
+  @Test
+  void abortsUploadWhenContentExceedsTheLimit() {
+    AtomicReference<CompletableFuture<PutObjectResponse>> upload = new AtomicReference<>();
+    when(asyncS3.putObject(any(PutObjectRequest.class), any(AsyncRequestBody.class)))
+        .thenAnswer(invocation -> {
+          CompletableFuture<PutObjectResponse> future = consume(
+              invocation.getArgument(1),
+              new AtomicReference<>());
+          upload.set(future);
+          return future;
+        });
+
+    IOException error = assertThrows(
+        IOException.class,
+        () -> storage.store(
+            "opaque/attachment",
+            KEY,
+            new ByteArrayInputStream(new byte[] {1, 2, 3}),
+            2));
+
+    assertEquals("Plaintext exceeds storage limit", error.getMessage());
+    assertTrue(upload.get().isCancelled());
+  }
+
+  @Test
+  void rejectsInvalidLimitBeforeStartingUpload() {
+    IOException error = assertThrows(
+        IOException.class,
+        () -> storage.store(
+            "opaque/attachment",
+            KEY,
+            new ByteArrayInputStream(new byte[0]),
+            -1));
+
+    assertEquals("Plaintext size limit is invalid", error.getMessage());
+    verifyNoInteractions(asyncS3);
   }
 
   @Test
@@ -179,7 +238,10 @@ class S3DocumentStorageGatewayTest {
 
     IOException error = assertThrows(
         IOException.class,
-        () -> storage.store("opaque/attachment.artifact", KEY, content));
+        () -> storage.store(
+            "opaque/attachment.artifact",
+            KEY,
+            content));
 
     assertEquals("source failed", error.getMessage());
     assertTrue(upload.get().isCancelled());
@@ -268,7 +330,7 @@ class S3DocumentStorageGatewayTest {
     return output.toByteArray();
   }
 
-  private static final class TrackingInputStream extends ByteArrayInputStream {
+  private static class TrackingInputStream extends ByteArrayInputStream {
 
     private final AtomicBoolean closed = new AtomicBoolean();
 

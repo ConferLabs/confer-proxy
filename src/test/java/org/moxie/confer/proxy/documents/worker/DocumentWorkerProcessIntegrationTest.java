@@ -104,7 +104,8 @@ class DocumentWorkerProcessIntegrationTest {
         "application/pdf",
         source.length,
         sourceKey,
-        KEY);
+        KEY,
+        null);
 
     ProcessDocumentWorkerGateway sessionGateway = new ProcessDocumentWorkerGateway(storage);
     try (DocumentWorkerConnection session = sessionGateway.connect()) {
@@ -217,7 +218,7 @@ class DocumentWorkerProcessIntegrationTest {
     };
   }
 
-  private static final class ProcessDocumentWorkerGateway implements DocumentWorkerGateway {
+  private static class ProcessDocumentWorkerGateway implements DocumentWorkerGateway {
 
     private final DocumentStorageGateway storage;
     private final AtomicInteger           activeProcesses = new AtomicInteger();
@@ -269,7 +270,7 @@ class DocumentWorkerProcessIntegrationTest {
     }
   }
 
-  private static final class ProcessDocumentWorkerConnection extends DocumentWorkerConnection {
+  private static class ProcessDocumentWorkerConnection extends DocumentWorkerConnection {
 
     private final Process       process;
     private final AtomicInteger activeProcesses;
@@ -309,7 +310,7 @@ class DocumentWorkerProcessIntegrationTest {
     }
   }
 
-  private static final class WorkerProcess {
+  private static class WorkerProcess {
 
     private final Process               process;
     private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();

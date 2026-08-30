@@ -11,7 +11,7 @@ import java.util.Objects;
  * invalidated when its callback returns, and cannot read into the following
  * payload.</p>
  */
-final class DocumentWorkerPayloadInputStream extends InputStream {
+class DocumentWorkerPayloadInputStream extends InputStream {
 
   private final InputStream input;
   private final long        length;

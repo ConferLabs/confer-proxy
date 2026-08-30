@@ -26,9 +26,9 @@ public abstract class DocumentTool<Request, Response> implements Tool {
     try {
       DocumentToolArguments values = readArguments(arguments);
       Request request = decodeArguments(values);
-      DocumentToolOutput<Response> output = execute(request, context.documentSession());
+      DocumentToolOutput<Response> output = execute(request, context.getDocumentSession());
       String content = mapper.writeValueAsString(output.content());
-      return new ToolResult(content, content, output.attachments());
+      return new ToolResult(content, content, output.images());
     } catch (IOException | InvalidDocumentToolArgumentsException | DocumentAccessException error) {
       return error(error);
     }

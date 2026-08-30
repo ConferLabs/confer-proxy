@@ -8,7 +8,7 @@ import java.util.regex.Pattern;
  * <p>The key is a locator, not an identity. Authorization to read its plaintext comes
  * from possession of the corresponding encryption key.</p>
  */
-public final class ObjectStorageKey {
+public class ObjectStorageKey {
 
   private static final int MAX_CHARS = 1_024;
   private static final Pattern VALID_CHARS = Pattern.compile("^[A-Za-z0-9._/-]+$");

@@ -6,7 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Objects;
 
-public final class DocumentExtractionResponse implements AutoCloseable {
+public class DocumentExtractionResponse implements AutoCloseable {
 
   private final DocumentWorkerConnection   connection;
   private final DocumentExtractionMetadata metadata;

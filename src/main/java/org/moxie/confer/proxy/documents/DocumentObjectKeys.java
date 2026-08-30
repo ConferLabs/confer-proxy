@@ -3,7 +3,7 @@ package org.moxie.confer.proxy.documents;
 import org.moxie.confer.proxy.storage.InvalidObjectStorageKeyException;
 import org.moxie.confer.proxy.storage.ObjectStorageKey;
 
-public final class DocumentObjectKeys {
+public class DocumentObjectKeys {
 
   private static final String TEXT_SUFFIX     = ".txt";
   private static final String ARTIFACT_SUFFIX = ".artifact";

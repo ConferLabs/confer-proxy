@@ -9,6 +9,8 @@ import org.moxie.confer.proxy.tools.documents.FileSearchTool;
 import org.moxie.confer.proxy.tools.documents.FileViewTool;
 import org.moxie.confer.proxy.tools.web.PageFetchTool;
 import org.moxie.confer.proxy.tools.web.WebSearchTool;
+import org.moxie.confer.proxy.tools.workers.ExecCommandTool;
+import org.moxie.confer.proxy.tools.workers.PublishFileTool;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -23,6 +25,8 @@ public class ToolRegistry {
   @Inject
   public ToolRegistry(WebSearchTool webSearchTool,
                       PageFetchTool pageFetchTool,
+                      ExecCommandTool execCommandTool,
+                      PublishFileTool publishFileTool,
                       FileOverviewTool fileOverviewTool,
                       FileSearchTool fileSearchTool,
                       FileReadTool fileReadTool,
@@ -31,6 +35,8 @@ public class ToolRegistry {
     Map<String, Tool> registeredTools = new LinkedHashMap<>();
     addTool(registeredTools, webSearchTool);
     addTool(registeredTools, pageFetchTool);
+    addTool(registeredTools, execCommandTool);
+    addTool(registeredTools, publishFileTool);
     addTool(registeredTools, fileOverviewTool);
     addTool(registeredTools, fileSearchTool);
     addTool(registeredTools, fileReadTool);

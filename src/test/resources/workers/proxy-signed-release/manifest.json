@@ -1,0 +1,8 @@
+{
+  "imageVersion": "0.1.10",
+  "proxyVersion": "0.1.18-SNAPSHOT1",
+  "tdxMeasurements": {
+    "rtmr1": "4def72cd8976d737ed01451e22a564f6a15e947ed4da147e29732c34ca4ce5e58f5a9a9652242126d67bd512ffb44feb",
+    "rtmr2": "f3880d748381351350cc9bfc5be4b62287b024b778109faa1ff88ff6a5125ecb3bf2dc0ad4dcea59d58369f45dd8f887"
+  }
+}

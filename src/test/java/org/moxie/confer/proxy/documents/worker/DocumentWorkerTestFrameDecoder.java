@@ -11,7 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public final class DocumentWorkerTestFrameDecoder {
+public class DocumentWorkerTestFrameDecoder {
 
   private static final TypeReference<Map<String, Object>> HEADER_TYPE = new TypeReference<>() {};
   private static final TypeReference<List<DocumentWorkerPayloadDescriptor>> PAYLOAD_TYPE =

@@ -4,7 +4,7 @@ import org.moxie.confer.proxy.tools.ToolRequirement;
 
 import java.util.Set;
 
-public final class ToolEligibility {
+public class ToolEligibility {
 
   private final Set<ToolRequirement> satisfiedRequirements;
 

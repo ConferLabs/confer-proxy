@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-public final class RequestToolSet {
+public class RequestToolSet {
 
   private static final RequestToolSet EMPTY = new RequestToolSet(Map.of());
 

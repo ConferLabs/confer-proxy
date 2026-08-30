@@ -10,7 +10,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.crypto.ImageToken;
 import org.moxie.confer.proxy.images.ImageReference;
-import org.moxie.confer.proxy.tools.ToolImageAttachment;
 import org.moxie.confer.proxy.tools.ToolResult;
 
 import java.util.List;
@@ -54,7 +53,7 @@ class OpenAIMessagePresenterTest {
     ToolResult result = new ToolResult(
         "model result",
         "client result",
-        List.of(new ToolImageAttachment(image)));
+        List.of(image));
 
     ToolResultPresentation presentation = presenter.presentToolResult("call-1", result);
 

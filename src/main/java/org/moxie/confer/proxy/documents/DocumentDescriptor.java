@@ -4,7 +4,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-public final class DocumentDescriptor {
+public class DocumentDescriptor {
 
   private static final Map<String, String> MEDIA_TYPES_BY_EXTENSION = Map.ofEntries(
       Map.entry(".pdf", "application/pdf"),
@@ -15,8 +15,10 @@ public final class DocumentDescriptor {
       Map.entry(".htm", "text/html"),
       Map.entry(".md", "text/markdown"),
       Map.entry(".txt", "text/plain"),
+      Map.entry(".css", "text/css"),
       Map.entry(".csv", "text/csv"),
       Map.entry(".json", "application/json"),
+      Map.entry(".js", "text/javascript"),
       Map.entry(".xml", "application/xml"),
       Map.entry(".yaml", "application/x-yaml"),
       Map.entry(".yml", "application/x-yaml"));

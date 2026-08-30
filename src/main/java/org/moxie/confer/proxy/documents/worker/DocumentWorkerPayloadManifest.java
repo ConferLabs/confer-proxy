@@ -4,7 +4,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-final class DocumentWorkerPayloadManifest {
+class DocumentWorkerPayloadManifest {
 
   private static final long MAX_PAYLOAD_BYTES       = 256L * 1024 * 1024;
   private static final long MAX_TOTAL_PAYLOAD_BYTES = 320L * 1024 * 1024;

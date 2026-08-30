@@ -23,18 +23,19 @@ import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
 import jakarta.validation.Validator;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
+import org.moxie.confer.proxy.attachments.AttachmentReference;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.documents.DocumentToolSession;
 import org.moxie.confer.proxy.documents.DocumentToolSessionFactory;
 import org.moxie.confer.proxy.documents.InvalidDocumentManifestException;
 import org.moxie.confer.proxy.entities.ChatRequest;
+import org.moxie.confer.proxy.entities.DocumentReference;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.entities.ToolCallContent;
 import org.moxie.confer.proxy.entities.ToolResponseContent;
 import org.moxie.confer.proxy.images.ImageReference;
 import org.moxie.confer.proxy.presenters.OpenAIMessagePresenter;
 import org.moxie.confer.proxy.presenters.ToolResultPresentation;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.tools.Tool;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
 import org.moxie.confer.proxy.tools.ToolRequirement;
@@ -42,8 +43,11 @@ import org.moxie.confer.proxy.tools.ToolResult;
 import org.moxie.confer.proxy.tools.registry.RequestToolSet;
 import org.moxie.confer.proxy.tools.registry.ToolEligibility;
 import org.moxie.confer.proxy.tools.registry.ToolRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
+import org.moxie.confer.proxy.workers.WorkerClient;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -64,6 +68,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   private final OpenAIMessagePresenter     messagePresenter;
   private final DocumentToolSessionFactory documentToolSessions;
   private final Validator                  validator;
+  private final WorkerClient               workerClient;
 
   public OpenAIWebsocketHandler(OpenAIClient client,
                                 ObjectMapper mapper,
@@ -71,7 +76,8 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
                                 Config config,
                                 OpenAIMessagePresenter messagePresenter,
                                 DocumentToolSessionFactory documentToolSessions,
-                                Validator validator)
+                                Validator validator,
+                                WorkerClient workerClient)
   {
     this.client               = client;
     this.mapper               = mapper;
@@ -80,16 +86,19 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     this.messagePresenter     = messagePresenter;
     this.documentToolSessions = Objects.requireNonNull(documentToolSessions, "documentToolSessions");
     this.validator            = Objects.requireNonNull(validator, "validator");
+    this.workerClient         = workerClient;
   }
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry streamRegistry) {
+  public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
+                                         WebsocketRequest           request)
+  {
     ChatRequest chatRequest = parseChatRequest(request);
     ChatModel   model       = ChatModel.of(config.getVllmServedModelName());
 
     if (chatRequest.stream()) {
       return new WebsocketHandlerResponse.StreamingResponse(
-          output -> handleStreamingResponse(model, chatRequest, output));
+          output -> handleStreamingResponse(context, model, chatRequest, output));
     } else {
       return new WebsocketHandlerResponse.SingleResponse(
           200,
@@ -120,19 +129,22 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     return client.chat().completions().create(params).choices().getFirst().message().content().orElse("");
   }
 
-  private void handleStreamingResponse(ChatModel model,
-                                       ChatRequest chatRequest,
-                                       OutputStream output)
+  private void handleStreamingResponse(WebsocketConnectionContext context,
+                                       ChatModel                  model,
+                                       ChatRequest                chatRequest,
+                                       OutputStream               output)
   {
     try {
       DocumentToolSession documentSession = documentToolSessions.open(chatRequest.documents());
+      WorkerWorkspace     workerWorkspace = context.getWorkerWorkspace(workerClient);
+
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
       int                              maxIterations       = config.getMaxToolIterations();
       int                              iteration           = 0;
       long                             contextTokens       = 0;
 
       RequestToolSet       serverTools     = toolRegistry.forRequest(toolEligibility(chatRequest));
-      ToolExecutionContext toolContext     = new ToolExecutionContext(documentSession);
+      ToolExecutionContext toolContext     = new ToolExecutionContext(documentSession, workerWorkspace);
       Set<String>          clientToolNames = chatRequest.clientTools() == null ? Set.of() :
                                              chatRequest.clientTools()
                                                         .stream()
@@ -151,7 +163,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
         }
 
         ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration, serverTools);
-        ChunkProcessor             processor = new ChunkProcessor(mapper);
+        ChunkProcessor             processor = new ChunkProcessor();
 
         try (StreamResponse<ChatCompletionChunk> response = client.chat().completions().createStreaming(params)) {
           response.stream().forEach(chunk -> processor.processChunk(chunk, output));
@@ -192,6 +204,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
                                        toolCalls.hasClientToolCalls()
                                            ? presentation.imageReferences()
                                            : List.of(),
+                                       result.attachments(),
                                        output);
             });
 
@@ -235,7 +248,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       satisfiedRequirements.add(ToolRequirement.WEB_ACCESS);
     }
 
-    if (request.documents() != null && !request.documents().isEmpty()) {
+    if (request.documents() != null && request.documents().stream().anyMatch(DocumentReference::supportsDocumentTools)) {
       satisfiedRequirements.add(ToolRequirement.DOCUMENTS);
     }
 
@@ -457,6 +470,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
                                         String content,
                                         String fullContent,
                                         List<ImageReference> imageRefs,
+                                        List<AttachmentReference> attachments,
                                         OutputStream output)
   {
     try {
@@ -472,6 +486,10 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
 
       if (!imageRefs.isEmpty()) {
         toolResponseMessage.put("image_refs", imageRefs);
+      }
+
+      if (!attachments.isEmpty()) {
+        toolResponseMessage.put("attachments", attachments);
       }
 
       String message = mapper.writeValueAsString(toolResponseMessage);
@@ -529,15 +547,10 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     }
   }
 
-  private static class ChunkProcessor {
+  private class ChunkProcessor {
 
     private final Map<Integer, ToolCallAccumulator> toolCalls = new TreeMap<>();
-    private final ObjectMapper mapper;
     private CompletionUsage    usage;
-
-    public ChunkProcessor(ObjectMapper mapper) {
-      this.mapper = mapper;
-    }
 
     public Optional<CompletionUsage> getUsage() {
       return Optional.ofNullable(usage);

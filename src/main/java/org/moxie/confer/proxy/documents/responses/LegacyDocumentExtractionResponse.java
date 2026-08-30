@@ -13,7 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /** Streams the deployed Docling-compatible response without buffering its text. */
-public final class LegacyDocumentExtractionResponse implements ManagedResource {
+public class LegacyDocumentExtractionResponse implements ManagedResource {
 
   private static final long EMPTY_RESPONSE_BYTES =
       "{\"document\":{\"md_content\":\"\"}}".getBytes(StandardCharsets.UTF_8).length;

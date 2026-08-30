@@ -8,7 +8,7 @@ import jakarta.ws.rs.WebApplicationException;
 import org.moxie.confer.proxy.entities.FetchHtmlRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.services.ExternalProxyService;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
@@ -27,7 +27,9 @@ public class ExternalProxyFetchHandler implements WebsocketHandler {
   ObjectMapper mapper;
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry streamRegistry) {
+  public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
+                                         WebsocketRequest           request)
+  {
     FetchHtmlRequest fetchRequest = parseRequest(request);
 
     if (fetchRequest.url() == null || fetchRequest.url().isBlank()) {

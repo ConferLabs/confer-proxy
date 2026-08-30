@@ -11,8 +11,6 @@ import org.moxie.confer.proxy.documents.DocumentPageViewResult;
 import org.moxie.confer.proxy.documents.DocumentToolSession;
 import org.moxie.confer.proxy.documents.requests.DocumentPageViewRequest;
 import org.moxie.confer.proxy.documents.responses.DocumentPageViewContent;
-import org.moxie.confer.proxy.tools.ToolAttachment;
-import org.moxie.confer.proxy.tools.ToolImageAttachment;
 import org.moxie.confer.proxy.tools.ToolRequirement;
 
 import java.io.IOException;
@@ -83,9 +81,6 @@ public class FileViewTool
     throws IOException, DocumentAccessException
   {
     DocumentPageViewResult result = session.viewPage(request);
-    List<ToolAttachment> attachments = result.images().stream()
-        .<ToolAttachment>map(ToolImageAttachment::new)
-        .toList();
-    return new DocumentToolOutput<>(result.content(), attachments);
+    return new DocumentToolOutput<>(result.content(), result.images());
   }
 }

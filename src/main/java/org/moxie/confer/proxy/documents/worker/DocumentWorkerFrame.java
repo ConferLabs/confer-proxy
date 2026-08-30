@@ -9,7 +9,7 @@ import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponseS
 import java.util.List;
 import java.util.Map;
 
-final class DocumentWorkerFrame<T> {
+class DocumentWorkerFrame<T> {
 
   static final int MAX_HEADER_BYTES = 64 * 1024;
 

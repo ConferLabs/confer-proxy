@@ -1,7 +1,7 @@
 package org.moxie.confer.proxy.documents.extraction;
 
-import org.moxie.confer.proxy.documents.DocumentDerivedStorage;
 import org.moxie.confer.proxy.documents.DocumentObjectKeys;
+import org.moxie.confer.proxy.documents.DocumentStorageWriter;
 import org.moxie.confer.proxy.documents.responses.DocumentExtractionResult;
 import org.moxie.confer.proxy.documents.worker.DocumentExtraction;
 import org.moxie.confer.proxy.documents.worker.DocumentWorkerPayloadDescriptor;
@@ -13,21 +13,21 @@ import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 /** Persists one worker extraction and retains text only when it will be inlined. */
-public final class DocumentExtractionWriter {
+public class DocumentExtractionWriter {
 
-  private final DocumentDerivedStorage storage;
-  private final DocumentObjectKeys     objectKeys;
-  private final String                 encryptionKey;
-  private final int                    inlineTextMaxCharacters;
-  private final DocumentExtraction     extraction;
+  private final DocumentStorageWriter storage;
+  private final DocumentObjectKeys    objectKeys;
+  private final String                encryptionKey;
+  private final int                   inlineTextMaxCharacters;
+  private final DocumentExtraction    extraction;
 
   private DocumentExtractionResult result;
 
-  public DocumentExtractionWriter(DocumentDerivedStorage storage,
-                                  DocumentObjectKeys objectKeys,
-                                  String encryptionKey,
-                                  int inlineTextMaxCharacters,
-                                  DocumentExtraction extraction)
+  public DocumentExtractionWriter(DocumentStorageWriter storage,
+                                  DocumentObjectKeys    objectKeys,
+                                  String                encryptionKey,
+                                  int                   inlineTextMaxCharacters,
+                                  DocumentExtraction    extraction)
   {
     if (inlineTextMaxCharacters < 0) {
       throw new IllegalArgumentException("Inline text limit must not be negative");
@@ -64,10 +64,7 @@ public final class DocumentExtractionWriter {
         && extraction.textCharacters() <= inlineTextMaxCharacters)
     {
       byte[] text = content.readAllBytes();
-      storage.store(
-          objectKeys.text(),
-          encryptionKey,
-          new ByteArrayInputStream(text));
+      storage.store(objectKeys.text(), encryptionKey, new ByteArrayInputStream(text));
       result = new DocumentExtractionResult(
           extraction.textCharacters(),
           new String(text, StandardCharsets.UTF_8));

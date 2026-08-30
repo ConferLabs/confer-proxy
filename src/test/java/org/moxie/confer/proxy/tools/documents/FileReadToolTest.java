@@ -13,6 +13,7 @@ import org.moxie.confer.proxy.documents.responses.DocumentReadResult;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
 import org.moxie.confer.proxy.tools.ToolRequirement;
 import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.util.List;
 import java.util.Set;
@@ -31,12 +32,15 @@ class FileReadToolTest {
   @Mock
   private DocumentToolSession documentSession;
 
+  @Mock
+  private WorkerWorkspace workerWorkspace;
+
   private ToolExecutionContext context;
   private FileReadTool         tool;
 
   @BeforeEach
   void setUp() {
-    context = new ToolExecutionContext(documentSession);
+    context = new ToolExecutionContext(documentSession, workerWorkspace);
     tool = new FileReadTool(MAPPER);
   }
 

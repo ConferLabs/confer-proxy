@@ -100,6 +100,9 @@ public class Config {
   @ConfigProperty(name = "s3.region", defaultValue = "us-east-1")
   private String s3Region;
 
+  @Inject
+  @ConfigProperty(name = "worker.controller.uri")
+  private String workerControllerUri;
 
   public List<String> getAllowedOrigins() {
     if (allowedOrigins == null) {
@@ -189,5 +192,9 @@ public class Config {
 
   public String getS3Region() {
     return s3Region;
+  }
+
+  public String getWorkerControllerUri() {
+    return workerControllerUri;
   }
 }

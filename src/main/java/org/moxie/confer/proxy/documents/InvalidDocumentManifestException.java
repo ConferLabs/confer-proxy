@@ -1,6 +1,6 @@
 package org.moxie.confer.proxy.documents;
 
-public final class InvalidDocumentManifestException extends Exception {
+public class InvalidDocumentManifestException extends Exception {
 
   public InvalidDocumentManifestException(String message) {
     super(message);

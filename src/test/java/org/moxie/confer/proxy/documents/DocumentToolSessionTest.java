@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -55,6 +56,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class DocumentToolSessionTest {
@@ -207,7 +209,8 @@ class DocumentToolSessionTest {
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(List.of(reference)),
         scheduler,
-        png -> IMAGE);
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
 
     session.search(new DocumentSearchRequest(SEARCH_QUERIES, reference.attachmentId()));
 
@@ -270,7 +273,8 @@ class DocumentToolSessionTest {
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(references),
         scheduler,
-        png -> IMAGE);
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
 
     DocumentSearchCollectionResult result = (DocumentSearchCollectionResult) session.search(
         new DocumentSearchRequest(SEARCH_QUERIES, null));
@@ -324,7 +328,8 @@ class DocumentToolSessionTest {
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(List.of(successfulReference, failedReference)),
         scheduler,
-        png -> IMAGE);
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
 
     DocumentSearchCollectionResult result = (DocumentSearchCollectionResult) session.search(
         new DocumentSearchRequest(SEARCH_QUERIES, null));
@@ -354,6 +359,57 @@ class DocumentToolSessionTest {
   }
 
   @Test
+  void keepsUnextractedAttachmentsOutOfDocumentTools() throws Exception {
+    DocumentReference reference = new DocumentReference(
+        "generated",
+        "generated.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        1,
+        "user/generated",
+        KEY,
+        false);
+    DocumentWorkerScheduler workers = mock(DocumentWorkerScheduler.class);
+    DocumentToolSession session = new DocumentToolSession(
+        new DocumentManifest(List.of(reference)),
+        workers,
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
+
+    assertThrows(
+        DocumentAccessException.class,
+        () -> session.overview(new DocumentOverviewRequest("generated")));
+    verifyNoInteractions(workers);
+  }
+
+  @Test
+  void opensOriginalAttachmentsForWorkerTools() throws Exception {
+    byte[] source = "source".getBytes(StandardCharsets.UTF_8);
+    DocumentReference reference = reference("source");
+    DocumentStorageGateway storage = mock(DocumentStorageGateway.class);
+    when(storage.open(reference.sourceObjectKey(), reference.encryptionKey()))
+        .thenReturn(new DecryptedDocument(
+            new ByteArrayInputStream(source),
+            source.length));
+    DocumentToolSession session = inputSession(reference, storage);
+
+    try (DecryptedDocument content = session.open(reference.attachmentId())) {
+      assertEquals(source.length, content.length());
+      assertArrayEquals(source, content.content().readAllBytes());
+    }
+  }
+
+  @Test
+  void rejectsUnknownWorkerInputsBeforeOpeningStorage() throws Exception {
+    DocumentStorageGateway storage = mock(DocumentStorageGateway.class);
+    DocumentToolSession session = inputSession(reference("source"), storage);
+
+    IOException error = assertThrows(IOException.class, () -> session.open("missing"));
+
+    assertEquals("Attachment is unavailable", error.getMessage());
+    verifyNoInteractions(storage);
+  }
+
+  @Test
   void acceptsOpaqueObjectStorageNamespaceWithoutAUserIdentity() {
     DocumentReference reference = new DocumentReference(
         "doc",
@@ -361,7 +417,8 @@ class DocumentToolSessionTest {
         "application/pdf",
         1,
         "opaque-namespace-7Kq/doc",
-        KEY);
+        KEY,
+        null);
 
     DocumentManifest manifest = assertDoesNotThrow(() -> new DocumentManifest(List.of(reference)));
 
@@ -376,7 +433,8 @@ class DocumentToolSessionTest {
         "application/pdf",
         1,
         "../doc",
-        KEY);
+        KEY,
+        null);
 
     assertThrows(
         InvalidDocumentManifestException.class,
@@ -392,12 +450,25 @@ class DocumentToolSessionTest {
         "application/pdf",
         1,
         "user/doc",
-        KEY);
+        KEY,
+        null);
     DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(new TestConfig(), worker);
     return new DocumentToolSession(
         new DocumentManifest(List.of(reference)),
         scheduler,
-        png -> IMAGE);
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
+  }
+
+  private static DocumentToolSession inputSession(DocumentReference       reference,
+                                                  DocumentStorageGateway storage)
+      throws InvalidDocumentManifestException
+  {
+    return new DocumentToolSession(
+        new DocumentManifest(List.of(reference)),
+        mock(DocumentWorkerScheduler.class),
+        png -> IMAGE,
+        storage);
   }
 
   private static DocumentReference reference(String attachmentId) {
@@ -407,7 +478,8 @@ class DocumentToolSessionTest {
         "application/pdf",
         1,
         "user/" + attachmentId,
-        KEY);
+        KEY,
+        null);
   }
 
   private static DocumentSearchResult searchResult(String text) {

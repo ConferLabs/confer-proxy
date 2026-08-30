@@ -13,6 +13,7 @@ import org.moxie.confer.proxy.documents.DocumentToolSessionFactory;
 import org.moxie.confer.proxy.presenters.OpenAIMessagePresenter;
 import org.moxie.confer.proxy.qualifiers.VllmAI;
 import org.moxie.confer.proxy.tools.registry.ToolRegistry;
+import org.moxie.confer.proxy.workers.WorkerClient;
 
 @ApplicationScoped
 public class OpenAIWebsocketHandlerProducer {
@@ -39,6 +40,9 @@ public class OpenAIWebsocketHandlerProducer {
   @Inject
   Validator validator;
 
+  @Inject
+  WorkerClient workerClient;
+
   @Produces
   @Named("vllm")
   @ApplicationScoped
@@ -50,7 +54,8 @@ public class OpenAIWebsocketHandlerProducer {
         config,
         messagePresenter,
         documentToolSessions,
-        validator);
+        validator,
+        workerClient);
   }
 
 }

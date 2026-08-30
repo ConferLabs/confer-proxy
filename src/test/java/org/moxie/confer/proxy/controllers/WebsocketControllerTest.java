@@ -8,19 +8,25 @@ import jakarta.websocket.Session;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.attestation.AttestationService;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
+import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.lifecycle.ManagedResource;
 import org.moxie.confer.proxy.websocket.Route;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
+import org.moxie.confer.proxy.workers.WorkerClient;
 
 import jakarta.websocket.CloseReason;
 import jakarta.ws.rs.WebApplicationException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -40,6 +46,8 @@ import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class WebsocketControllerTest {
+
+  private static final String ATTACHMENT_PREFIX = "generated-attachments";
 
   @Mock
   private AttestationService attestationService;
@@ -63,7 +71,14 @@ class WebsocketControllerTest {
     sentMessages = Collections.synchronizedList(new ArrayList<>());
 
     lenient().when(session.getBasicRemote()).thenReturn(basicRemote);
-    lenient().when(session.getUserProperties()).thenReturn(new java.util.HashMap<>());
+    Map<String, Object> authenticatedProperties = new HashMap<>();
+    authenticatedProperties.put(
+        WebsocketConnectionContext.SESSION_PROPERTY,
+        new WebsocketConnectionContext(
+            ATTACHMENT_PREFIX,
+            Instant.now().plusSeconds(3600),
+            false));
+    lenient().when(session.getUserProperties()).thenReturn(authenticatedProperties);
     lenient().doAnswer(invocation -> {
       ByteBuffer buffer = invocation.getArgument(0);
       byte[] copy = new byte[buffer.remaining()];
@@ -100,7 +115,7 @@ class WebsocketControllerTest {
     AtomicInteger fastHandlerCallCount = new AtomicInteger(0);
 
     // Slow handler that blocks until we signal it
-    WebsocketHandler slowHandler = (request, registry) -> {
+    WebsocketHandler slowHandler = (context, request) -> {
       slowHandlerCallCount.incrementAndGet();
       slowHandlerStarted.countDown();
       try {
@@ -112,7 +127,7 @@ class WebsocketControllerTest {
     };
 
     // Fast handler (like ping) that completes immediately
-    WebsocketHandler fastHandler = (request, registry) -> {
+    WebsocketHandler fastHandler = (context, request) -> {
       fastHandlerCallCount.incrementAndGet();
       fastHandlerCompleted.countDown();
       return new WebsocketHandlerResponse.SingleResponse(200, "pong");
@@ -145,10 +160,7 @@ class WebsocketControllerTest {
     // Let slow handler finish
     slowHandlerCanFinish.countDown();
 
-    // Give time for responses to be sent
-    Thread.sleep(100);
-
-    // Should have received responses for both requests
+    verify(basicRemote, timeout(1_000).times(2)).sendBinary(any(ByteBuffer.class));
     assertTrue(sentMessages.size() >= 2, "Should have sent at least 2 responses");
   }
 
@@ -184,7 +196,7 @@ class WebsocketControllerTest {
     CountDownLatch handlerStarted = new CountDownLatch(1);
     CountDownLatch handlerCanFinish = new CountDownLatch(1);
 
-    WebsocketHandler blockingHandler = (request, registry) -> {
+    WebsocketHandler blockingHandler = (context, request) -> {
       handlerStarted.countDown();
       try {
         handlerCanFinish.await(10, TimeUnit.SECONDS);
@@ -222,11 +234,27 @@ class WebsocketControllerTest {
     byte[] request = createProtobufRequest(1, "GET", "/nonexistent", null);
     controller.testOnReceiveMessage(session, request);
 
-    // Give virtual thread time to process
-    Thread.sleep(100);
-
-    // Should have sent a 404 response
+    verify(basicRemote, timeout(1_000)).sendBinary(any(ByteBuffer.class));
     assertFalse(sentMessages.isEmpty(), "Should have sent a response");
+  }
+
+  @Test
+  void onReceiveMessage_missingAuthenticationFailsClosed() throws Exception {
+    when(session.getUserProperties()).thenReturn(Map.of());
+    AtomicInteger handlerCalls = new AtomicInteger();
+    WebsocketHandler handler = (context, request) -> {
+      handlerCalls.incrementAndGet();
+      return new WebsocketHandlerResponse.SingleResponse(200, "ok");
+    };
+    controller.setRoutes(Map.of(
+        new Route("GET", "/test"), handler));
+
+    controller.testOnReceiveMessage(
+        session,
+        createProtobufRequest(1, "GET", "/test", null));
+    verify(basicRemote, timeout(1_000)).sendBinary(any(ByteBuffer.class));
+    assertEquals(0, handlerCalls.get());
+    assertFalse(sentMessages.isEmpty(), "Should have sent a 401 response");
   }
 
   @Test
@@ -237,9 +265,7 @@ class WebsocketControllerTest {
     byte[] invalidData = "not a protobuf".getBytes();
     controller.testOnReceiveMessage(session, invalidData);
 
-    Thread.sleep(100);
-
-    verify(session, atLeastOnce()).close(any(CloseReason.class));
+    verify(session, timeout(1_000).atLeastOnce()).close(any(CloseReason.class));
   }
 
   @Test
@@ -256,14 +282,12 @@ class WebsocketControllerTest {
 
     controller.testOnReceiveMessage(session, request);
 
-    Thread.sleep(100);
-
-    verify(session, atLeastOnce()).close(any(CloseReason.class));
+    verify(session, timeout(1_000).atLeastOnce()).close(any(CloseReason.class));
   }
 
   @Test
   void onReceiveMessage_handlerThrowsWebApplicationException_returnsErrorStatus() throws Exception {
-    WebsocketHandler throwingHandler = (request, registry) -> {
+    WebsocketHandler throwingHandler = (context, request) -> {
       throw new WebApplicationException("Bad request", 400);
     };
 
@@ -274,14 +298,13 @@ class WebsocketControllerTest {
     byte[] request = createProtobufRequest(1, "POST", "/error", "");
     controller.testOnReceiveMessage(session, request);
 
-    Thread.sleep(100);
-
-    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+    verify(basicRemote, timeout(1_000)).sendBinary(any(ByteBuffer.class));
+    assertFalse(sentMessages.isEmpty());
   }
 
   @Test
   void onReceiveMessage_handlerThrowsException_returns500() throws Exception {
-    WebsocketHandler throwingHandler = (request, registry) -> {
+    WebsocketHandler throwingHandler = (context, request) -> {
       throw new RuntimeException("Unexpected error");
     };
 
@@ -292,22 +315,23 @@ class WebsocketControllerTest {
     byte[] request = createProtobufRequest(1, "POST", "/crash", "");
     controller.testOnReceiveMessage(session, request);
 
-    Thread.sleep(100);
-
-    assertFalse(sentMessages.isEmpty(), "Should have sent an error response");
+    verify(basicRemote, timeout(1_000)).sendBinary(any(ByteBuffer.class));
+    assertFalse(sentMessages.isEmpty());
   }
 
   @Test
   void onReceiveMessage_streamContinuation_handlesChunk() throws Exception {
     CountDownLatch chunkReceived = new CountDownLatch(1);
+    CountDownLatch handlerComplete = new CountDownLatch(1);
 
-    WebsocketHandler streamHandler = (request, registry) -> {
+    WebsocketHandler streamHandler = (context, request) -> {
       return new WebsocketHandlerResponse.StreamingResponse(output -> {
         try {
           // Register the stream and wait for chunks
-          var ctx = registry.createStream(request.id(), new ByteArrayOutputStream());
+          context.getStreams().createStream(request.id(), new ByteArrayOutputStream());
           chunkReceived.await(5, TimeUnit.SECONDS);
           output.write("done".getBytes());
+          handlerComplete.countDown();
         } catch (InterruptedException e) {
           throw new AssertionError(e);
         }
@@ -322,15 +346,12 @@ class WebsocketControllerTest {
     byte[] initialRequest = createStreamingProtobufRequest(1, "POST", "/stream", "", "chunk1".getBytes(), 0, false);
     controller.testOnReceiveMessage(session, initialRequest);
 
-    Thread.sleep(50);
-
     // Send continuation chunk
     byte[] continuation = createContinuationChunk(1, "chunk2".getBytes(), 1, true);
     controller.testOnReceiveMessage(session, continuation);
 
     chunkReceived.countDown();
-
-    Thread.sleep(100);
+    assertTrue(handlerComplete.await(5, TimeUnit.SECONDS));
   }
 
   @Test
@@ -346,20 +367,21 @@ class WebsocketControllerTest {
 
     controller.testOnReceiveMessage(session, invalidContinuation);
 
-    Thread.sleep(100);
-
-    // Should close since it's invalid (no verb/path and no chunk)
-    verify(session, atLeastOnce()).close(any(CloseReason.class));
+    verify(session, timeout(1_000).atLeastOnce()).close(any(CloseReason.class));
   }
 
   @Test
   void onReceiveMessage_freeTierExpiredToken_returns402() throws Exception {
     Map<String, Object> userProps = new HashMap<>();
-    userProps.put("tokenExpiry", Instant.now().minusSeconds(60)); // Expired
-    userProps.put("subscribed", false);
+    userProps.put(
+        WebsocketConnectionContext.SESSION_PROPERTY,
+        new WebsocketConnectionContext(
+            ATTACHMENT_PREFIX,
+            Instant.now().minusSeconds(60),
+            false));
     when(session.getUserProperties()).thenReturn(userProps);
 
-    WebsocketHandler handler = (request, registry) -> {
+    WebsocketHandler handler = (context, request) -> {
       return new WebsocketHandlerResponse.SingleResponse(200, "ok");
     };
 
@@ -370,20 +392,23 @@ class WebsocketControllerTest {
     byte[] request = createProtobufRequest(1, "GET", "/test", null);
     controller.testOnReceiveMessage(session, request);
 
-    Thread.sleep(100);
-
+    verify(basicRemote, timeout(1_000)).sendBinary(any(ByteBuffer.class));
     assertFalse(sentMessages.isEmpty(), "Should have sent a 402 response");
   }
 
   @Test
   void onReceiveMessage_subscribedUser_bypassesTokenExpiry() throws Exception {
     Map<String, Object> userProps = new HashMap<>();
-    userProps.put("tokenExpiry", Instant.now().minusSeconds(60)); // Expired
-    userProps.put("subscribed", true);
+    userProps.put(
+        WebsocketConnectionContext.SESSION_PROPERTY,
+        new WebsocketConnectionContext(
+            ATTACHMENT_PREFIX,
+            Instant.now().minusSeconds(60),
+            true));
     when(session.getUserProperties()).thenReturn(userProps);
 
     CountDownLatch handlerCalled = new CountDownLatch(1);
-    WebsocketHandler handler = (request, registry) -> {
+    WebsocketHandler handler = (context, request) -> {
       handlerCalled.countDown();
       return new WebsocketHandlerResponse.SingleResponse(200, "ok");
     };
@@ -399,12 +424,39 @@ class WebsocketControllerTest {
   }
 
   @Test
+  void onReceiveMessage_passesVerifiedAuthorizationToTheHandler() throws Exception {
+    WebsocketConnectionContext connectionContext = new WebsocketConnectionContext(
+        ATTACHMENT_PREFIX,
+        Instant.now().plusSeconds(60),
+        false);
+    Map<String, Object> userProps = new HashMap<>();
+    userProps.put(
+        WebsocketConnectionContext.SESSION_PROPERTY,
+        connectionContext);
+    when(session.getUserProperties()).thenReturn(userProps);
+    OpenAIWebsocketHandler handler = mock(OpenAIWebsocketHandler.class);
+    when(handler.handle(any(), any()))
+        .thenReturn(new WebsocketHandlerResponse.SingleResponse(200, "ok"));
+    controller.vllmWebsocketHandler = handler;
+    controller.testInitializeRoutes();
+
+    controller.testOnReceiveMessage(
+        session,
+        createProtobufRequest(1, "POST", "/v1/vllm/chat/completions", ""));
+
+    ArgumentCaptor<WebsocketConnectionContext> context = ArgumentCaptor.forClass(
+        WebsocketConnectionContext.class);
+    verify(handler, timeout(1_000)).handle(context.capture(), any());
+    assertSame(connectionContext, context.getValue());
+  }
+
+  @Test
   void onReceiveMessage_streamingResponse_writesToOutput() throws Exception {
     CountDownLatch handlerComplete = new CountDownLatch(1);
     CountDownLatch resourceClosed  = new CountDownLatch(1);
     ManagedResource resource       = resourceClosed::countDown;
 
-    WebsocketHandler streamingHandler = (request, registry) -> {
+    WebsocketHandler streamingHandler = (context, request) -> {
       return WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
         output.write("chunk1".getBytes());
         output.write("chunk2".getBytes());
@@ -429,7 +481,7 @@ class WebsocketControllerTest {
     CountDownLatch resourceClosed = new CountDownLatch(1);
     ManagedResource resource      = resourceClosed::countDown;
 
-    WebsocketHandler streamingHandler = (request, registry) ->
+    WebsocketHandler streamingHandler = (context, request) ->
         WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
           output.write("token-one".getBytes());
           output.flush();
@@ -447,16 +499,17 @@ class WebsocketControllerTest {
   }
 
   @Test
-  void onReceiveMessage_streamingResponseThrowsIOException_sendsError() throws Exception {
+  void onReceiveMessage_streamingResponseFailureClosesTheConnection() throws Exception {
     CountDownLatch resourceClosed = new CountDownLatch(1);
-    CountDownLatch responseSent   = new CountDownLatch(1);
     ManagedResource resource      = resourceClosed::countDown;
-    doAnswer(invocation -> {
-      responseSent.countDown();
-      return null;
-    }).when(basicRemote).sendBinary(any(ByteBuffer.class));
+    WorkerWorkspace workerWorkspace = mock(WorkerWorkspace.class);
+    WebsocketConnectionContext context = (WebsocketConnectionContext) session
+        .getUserProperties()
+        .get(WebsocketConnectionContext.SESSION_PROPERTY);
+    retainWorkspace(context, workerWorkspace);
+    when(session.isOpen()).thenReturn(true);
 
-    WebsocketHandler streamingHandler = (request, registry) -> {
+    WebsocketHandler streamingHandler = (connectionContext, request) -> {
       return WebsocketHandlerResponse.StreamingResponse.using(() -> resource, (ignored, output) -> {
         throw new IOException("Write failed");
       });
@@ -470,19 +523,44 @@ class WebsocketControllerTest {
     controller.testOnReceiveMessage(session, request);
 
     assertTrue(resourceClosed.await(5, TimeUnit.SECONDS), "Failed streaming resource should close");
-    assertTrue(responseSent.await(5, TimeUnit.SECONDS), "Should have sent an error response");
+    verify(session, timeout(5_000)).close(any(CloseReason.class));
+    verify(workerWorkspace, timeout(5_000)).close();
   }
 
   @Test
-  void onClose_cancelsAllStreams() throws Exception {
-    controller.setRoutes(Map.of());
+  void onClose_closesWorkerWorkspace() throws Exception {
+    WorkerWorkspace workerWorkspace = mock(WorkerWorkspace.class);
+    WebsocketConnectionContext context = (WebsocketConnectionContext) session
+        .getUserProperties()
+        .get(WebsocketConnectionContext.SESSION_PROPERTY);
+    retainWorkspace(context, workerWorkspace);
 
-    CloseReason closeReason = new CloseReason(CloseReason.CloseCodes.NORMAL_CLOSURE, "Test");
-    controller.testOnClose(session, closeReason);
+    controller.testOnClose(
+        session,
+        new CloseReason(CloseReason.CloseCodes.NORMAL_CLOSURE, "Test"));
 
-    // Should not throw - streamRegistry.cancelAll() is called
+    verify(workerWorkspace).close();
   }
 
+  @Test
+  void onError_closesWorkerWorkspace() throws Exception {
+    when(session.isOpen()).thenReturn(true);
+    WorkerWorkspace workerWorkspace = mock(WorkerWorkspace.class);
+    WebsocketConnectionContext context = (WebsocketConnectionContext) session
+        .getUserProperties()
+        .get(WebsocketConnectionContext.SESSION_PROPERTY);
+    retainWorkspace(context, workerWorkspace);
+
+    controller.testOnError(session, new IOException("closed"));
+
+    verify(workerWorkspace).close();
+    ArgumentCaptor<CloseReason> closeReason = ArgumentCaptor.forClass(
+        CloseReason.class);
+    verify(session).close(closeReason.capture());
+    assertEquals(
+        CloseReason.CloseCodes.UNEXPECTED_CONDITION,
+        closeReason.getValue().getCloseCode());
+  }
 
   private byte[] createProtobufRequest(long id, String verb, String path, String body) {
     confer.NoiseTransport.WebsocketRequest.Builder builder = confer.NoiseTransport.WebsocketRequest.newBuilder()
@@ -495,6 +573,15 @@ class WebsocketControllerTest {
     }
 
     return builder.build().toByteArray();
+  }
+
+  private static void retainWorkspace(WebsocketConnectionContext context,
+                                      WorkerWorkspace             workspace)
+  {
+    WorkerClient client = mock(WorkerClient.class);
+    when(client.getWorkspace(anyString()))
+        .thenReturn(workspace);
+    context.getWorkerWorkspace(client);
   }
 
   private byte[] createStreamingProtobufRequest(long id, String verb, String path, String body, byte[] chunkData, int seq, boolean isFinal) {
@@ -536,35 +623,31 @@ class WebsocketControllerTest {
    */
   private static class TestableWebsocketController extends WebsocketController {
 
-    private Map<org.moxie.confer.proxy.websocket.Route, WebsocketHandler> testRoutes;
-
     TestableWebsocketController(AttestationService attestationService, ObjectMapper mapper, CipherState cipher) {
       super(attestationService, mapper);
 
       // Use reflection to set the sendCipher field in parent class
       try {
-        java.lang.reflect.Field sendCipherField =
+        Field sendCipherField =
             org.moxie.confer.proxy.websocket.NoiseConnectionWebsocket.class.getDeclaredField("sendCipher");
         sendCipherField.setAccessible(true);
         sendCipherField.set(this, cipher);
-      } catch (Exception e) {
+      } catch (ReflectiveOperationException e) {
         throw new RuntimeException("Failed to set mock cipher", e);
       }
     }
 
     void setRoutes(Map<org.moxie.confer.proxy.websocket.Route, WebsocketHandler> routes) {
-      this.testRoutes = routes;
-
       // Use reflection to set the routes field
       try {
-        java.lang.reflect.Field routesField = WebsocketController.class.getDeclaredField("routes");
+        Field routesField = WebsocketController.class.getDeclaredField("routes");
         routesField.setAccessible(true);
         @SuppressWarnings("unchecked")
         Map<org.moxie.confer.proxy.websocket.Route, WebsocketHandler> actualRoutes =
             (Map<org.moxie.confer.proxy.websocket.Route, WebsocketHandler>) routesField.get(this);
         actualRoutes.clear();
         actualRoutes.putAll(routes);
-      } catch (Exception e) {
+      } catch (ReflectiveOperationException e) {
         throw new RuntimeException("Failed to set routes", e);
       }
     }
@@ -577,13 +660,17 @@ class WebsocketControllerTest {
       onClose(session, closeReason);
     }
 
+    void testOnError(Session session, Throwable error) {
+      onError(session, error);
+    }
+
     void testInitializeRoutes() {
       initializeRoutes();
     }
 
     WebsocketHandler handlerFor(Route route) {
       try {
-        java.lang.reflect.Field routesField = WebsocketController.class.getDeclaredField("routes");
+        Field routesField = WebsocketController.class.getDeclaredField("routes");
         routesField.setAccessible(true);
         @SuppressWarnings("unchecked")
         Map<Route, WebsocketHandler> actualRoutes =
@@ -593,5 +680,6 @@ class WebsocketControllerTest {
         throw new IllegalStateException("Failed to read routes", error);
       }
     }
+
   }
 }

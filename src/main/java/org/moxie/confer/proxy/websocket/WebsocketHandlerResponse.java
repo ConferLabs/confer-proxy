@@ -19,7 +19,7 @@ public sealed interface WebsocketHandlerResponse
 
   record SingleResponse(int statusCode, String body) implements WebsocketHandlerResponse {}
 
-  final class StreamingResponse implements WebsocketHandlerResponse {
+  non-sealed class StreamingResponse implements WebsocketHandlerResponse {
 
     private static final ManagedResource NO_RESOURCE = () -> {};
 

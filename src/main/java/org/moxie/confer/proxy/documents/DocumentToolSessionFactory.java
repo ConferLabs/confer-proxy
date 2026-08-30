@@ -13,19 +13,22 @@ public class DocumentToolSessionFactory {
 
   private final DocumentWorkerScheduler workers;
   private final TemporaryImageStorage   images;
+  private final DocumentStorageGateway  storage;
 
   @Inject
   public DocumentToolSessionFactory(DocumentWorkerScheduler workers,
-                                    TemporaryImageStorage images)
+                                    TemporaryImageStorage images,
+                                    DocumentStorageGateway storage)
   {
     this.workers = workers;
     this.images  = images;
+    this.storage = storage;
   }
 
   public DocumentToolSession open(List<DocumentReference> references)
     throws InvalidDocumentManifestException
   {
     DocumentManifest manifest = new DocumentManifest(references);
-    return new DocumentToolSession(manifest, workers, images);
+    return new DocumentToolSession(manifest, workers, images, storage);
   }
 }

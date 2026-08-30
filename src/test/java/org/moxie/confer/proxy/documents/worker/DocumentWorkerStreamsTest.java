@@ -480,7 +480,7 @@ class DocumentWorkerStreamsTest {
     return DocumentWorkerResponse.success(result, payloads);
   }
 
-  private static final class GuardedInputStream extends ByteArrayInputStream {
+  private static class GuardedInputStream extends ByteArrayInputStream {
 
     private final int maximumRead;
 

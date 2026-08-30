@@ -10,7 +10,7 @@ import org.moxie.confer.proxy.entities.EmbeddingRequest;
 import org.moxie.confer.proxy.entities.EmbeddingResponse;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.services.EmbeddingService;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 import org.slf4j.Logger;
@@ -31,7 +31,9 @@ public class EmbeddingHandler implements WebsocketHandler {
   ObjectMapper mapper;
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry streamRegistry) {
+  public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
+                                         WebsocketRequest           request)
+  {
     EmbeddingRequest embeddingRequest = parseRequest(request);
 
     if (embeddingRequest.texts() == null || embeddingRequest.texts().isEmpty()) {

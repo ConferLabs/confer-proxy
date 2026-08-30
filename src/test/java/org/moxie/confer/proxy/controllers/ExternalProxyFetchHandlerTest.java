@@ -9,7 +9,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.services.ExternalProxyService;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
 import java.lang.reflect.Field;
@@ -31,12 +30,10 @@ class ExternalProxyFetchHandlerTest {
 
   private ObjectMapper        mapper;
   private ExternalProxyFetchHandler handler;
-  private StreamRegistry      streamRegistry;
 
   @BeforeEach
   void setUp() throws Exception {
     mapper         = new ObjectMapper();
-    streamRegistry = new StreamRegistry();
     handler        = new ExternalProxyFetchHandler();
 
     setField(handler, "externalProxyService", externalProxyService);
@@ -48,7 +45,7 @@ class ExternalProxyFetchHandlerTest {
     when(externalProxyService.fetchHtml(eq("https://shop.example.com/p"), any())).thenReturn("<html>ok</html>");
 
     WebsocketRequest request = createRequest("{\"url\": \"https://shop.example.com/p\"}");
-    WebsocketHandlerResponse response = handler.handle(request, streamRegistry);
+    WebsocketHandlerResponse response = handler.handle(null, request);
 
     assertInstanceOf(WebsocketHandlerResponse.SingleResponse.class, response);
     WebsocketHandlerResponse.SingleResponse single = (WebsocketHandlerResponse.SingleResponse) response;
@@ -66,7 +63,7 @@ class ExternalProxyFetchHandlerTest {
         "{\"url\": \"https://shop.example.com/p\", "
         + "\"headers\": {\"User-Agent\": \"CustomUA/1.0\", \"Accept-Language\": \"en-US\"}}");
     WebsocketHandlerResponse.SingleResponse single =
-        (WebsocketHandlerResponse.SingleResponse) handler.handle(request, streamRegistry);
+        (WebsocketHandlerResponse.SingleResponse) handler.handle(null, request);
 
     assertEquals(200, single.statusCode());
     assertEquals("<html>ok</html>", single.body());
@@ -79,7 +76,7 @@ class ExternalProxyFetchHandlerTest {
     WebsocketRequest request = createRequest("{\"url\": \"https://shop.example.com/p\"}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(502, exception.getResponse().getStatus());
   }
 
@@ -88,7 +85,7 @@ class ExternalProxyFetchHandlerTest {
     WebsocketRequest request = createRequest("{}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -97,7 +94,7 @@ class ExternalProxyFetchHandlerTest {
     WebsocketRequest request = createRequest("{\"url\": \"   \"}");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -106,7 +103,7 @@ class ExternalProxyFetchHandlerTest {
     WebsocketRequest request = new WebsocketRequest(1L, "POST", "/v1/fetch/html", Optional.empty());
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 
@@ -115,7 +112,7 @@ class ExternalProxyFetchHandlerTest {
     WebsocketRequest request = createRequest("not json");
 
     WebApplicationException exception = assertThrows(WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(null, request));
     assertEquals(400, exception.getResponse().getStatus());
   }
 

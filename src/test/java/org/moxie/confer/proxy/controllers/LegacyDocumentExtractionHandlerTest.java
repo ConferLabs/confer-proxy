@@ -23,7 +23,7 @@ import org.moxie.confer.proxy.documents.worker.responses.DocumentExtractionMetad
 import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponse;
 import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponsePayload;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
-import org.moxie.confer.proxy.streaming.StreamRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 
 import java.io.ByteArrayInputStream;
@@ -31,6 +31,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -53,7 +54,7 @@ class LegacyDocumentExtractionHandlerTest {
   private TestConfig                      config;
   private ObjectMapper                    mapper;
   private LegacyDocumentExtractionHandler handler;
-  private StreamRegistry                  streamRegistry;
+  private WebsocketConnectionContext      context;
   private ByteArrayInputStream             workerResponses;
 
   @BeforeAll
@@ -71,7 +72,10 @@ class LegacyDocumentExtractionHandlerTest {
     workerGateway = new TestDocumentWorkerGateway();
     config = new TestConfig();
     mapper = new ObjectMapper();
-    streamRegistry = new StreamRegistry();
+    context = new WebsocketConnectionContext(
+        "generated-attachments",
+        Instant.MAX,
+        true);
     handler = new LegacyDocumentExtractionHandler();
     setField(handler, "mapper", mapper);
     setField(handler, "validator", validatorFactory.getValidator());
@@ -88,7 +92,7 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(context, request));
 
     assertEquals(400, error.getResponse().getStatus());
   }
@@ -142,7 +146,7 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebsocketHandlerResponse.StreamingResponse streaming = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
-        handler.handle(legacyRequest(new byte[] {1}, 1, true), streamRegistry));
+        handler.handle(context, legacyRequest(new byte[] {1}, 1, true)));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     try (streaming) {
       streaming.writeTo(output);
@@ -168,7 +172,7 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(legacyRequest(new byte[] {1}, 1, true), streamRegistry));
+        () -> handler.handle(context, legacyRequest(new byte[] {1}, 1, true)));
 
     assertEquals(502, error.getResponse().getStatus());
   }
@@ -187,7 +191,7 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(legacyRequest(new byte[] {1}, 1, true), streamRegistry));
+        () -> handler.handle(context, legacyRequest(new byte[] {1}, 1, true)));
 
     assertEquals(502, error.getResponse().getStatus());
   }
@@ -200,7 +204,7 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(legacyRequest(new byte[] {1}, 1, true), streamRegistry));
+        () -> handler.handle(context, legacyRequest(new byte[] {1}, 1, true)));
 
     assertEquals(422, error.getResponse().getStatus());
   }
@@ -216,9 +220,9 @@ class LegacyDocumentExtractionHandlerTest {
 
     WebsocketRequest initial = legacyRequest(chunks[0], data.length, chunkCount == 1);
     CompletableFuture<WebsocketHandlerResponse> response = CompletableFuture.supplyAsync(
-        () -> handler.handle(initial, streamRegistry));
+        () -> handler.handle(context, initial));
     for (int index = 1; index < chunks.length; index++) {
-      streamRegistry.handleChunk(1, chunks[index], index, index == chunks.length - 1);
+      context.getStreams().handleChunk(1, chunks[index], index, index == chunks.length - 1);
     }
     return response.get(10, TimeUnit.SECONDS);
   }
@@ -258,7 +262,7 @@ class LegacyDocumentExtractionHandlerTest {
         Optional.of(new WebsocketRequest.StreamChunk(new byte[] {1}, true, 0)));
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(request, streamRegistry));
+        () -> handler.handle(context, request));
 
     assertEquals(400, error.getResponse().getStatus());
   }

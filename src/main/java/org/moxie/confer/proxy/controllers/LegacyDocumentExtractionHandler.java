@@ -19,6 +19,7 @@ import org.moxie.confer.proxy.documents.worker.requests.DocumentWorkerRequestPay
 import org.moxie.confer.proxy.documents.worker.requests.ExtractDocumentRequest;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.streaming.StreamRegistry;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
 import org.slf4j.Logger;
@@ -46,7 +47,10 @@ public class LegacyDocumentExtractionHandler implements WebsocketHandler {
   DocumentWorkerScheduler workers;
 
   @Override
-  public WebsocketHandlerResponse handle(WebsocketRequest request, StreamRegistry registry) {
+  public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
+                                         WebsocketRequest           request)
+  {
+    StreamRegistry                  registry   = context.getStreams();
     WebsocketRequest.StreamChunk    firstChunk = request.chunk().orElseThrow(() -> new WebApplicationException("Streaming required for document extraction", 400));
     LegacyDocumentExtractionRequest options    = parseRequest(request);
     DocumentDescriptor              document   = documentDescriptor(options);

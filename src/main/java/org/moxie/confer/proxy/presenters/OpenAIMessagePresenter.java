@@ -11,8 +11,6 @@ import jakarta.inject.Inject;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.crypto.ImageToken;
 import org.moxie.confer.proxy.images.ImageReference;
-import org.moxie.confer.proxy.tools.ToolAttachment;
-import org.moxie.confer.proxy.tools.ToolImageAttachment;
 import org.moxie.confer.proxy.tools.ToolResult;
 
 import java.net.URLEncoder;
@@ -37,10 +35,7 @@ public class OpenAIMessagePresenter {
 
   public ToolResultPresentation presentToolResult(String toolCallId, ToolResult result) {
     List<ChatCompletionMessageParam> messages        = new ArrayList<>();
-    List<ImageReference>             imageReferences = result.attachments()
-        .stream()
-        .map(this::imageReference)
-        .toList();
+    List<ImageReference>             imageReferences = result.images();
 
     ChatCompletionToolMessageParam toolMessage = ChatCompletionToolMessageParam.builder()
                                                                                 .toolCallId(toolCallId)
@@ -89,12 +84,6 @@ public class OpenAIMessagePresenter {
         .build();
 
     return ChatCompletionContentPart.ofImageUrl(image);
-  }
-
-  private ImageReference imageReference(ToolAttachment attachment) {
-    return switch (attachment) {
-      case ToolImageAttachment image -> image.reference();
-    };
   }
 
   private String urlEncode(String value) {

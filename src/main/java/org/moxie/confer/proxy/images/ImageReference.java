@@ -9,7 +9,7 @@ import java.util.Base64;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
-public final class ImageReference {
+public class ImageReference {
 
   private static final Pattern IMAGE_MEDIA_TYPE = Pattern.compile("^image/[A-Za-z0-9.+-]+$");
 

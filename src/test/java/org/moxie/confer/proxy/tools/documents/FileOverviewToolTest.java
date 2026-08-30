@@ -15,6 +15,7 @@ import org.moxie.confer.proxy.documents.responses.DocumentOverviewResult;
 import org.moxie.confer.proxy.tools.ToolExecutionContext;
 import org.moxie.confer.proxy.tools.ToolRequirement;
 import org.moxie.confer.proxy.tools.ToolResult;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.io.IOException;
 import java.util.List;
@@ -34,12 +35,15 @@ class FileOverviewToolTest {
   @Mock
   private DocumentToolSession documentSession;
 
+  @Mock
+  private WorkerWorkspace workerWorkspace;
+
   private ToolExecutionContext context;
   private FileOverviewTool     tool;
 
   @BeforeEach
   void setUp() {
-    context = new ToolExecutionContext(documentSession);
+    context = new ToolExecutionContext(documentSession, workerWorkspace);
     tool = new FileOverviewTool(MAPPER);
   }
 

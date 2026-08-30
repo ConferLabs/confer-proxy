@@ -1,15 +1,15 @@
 package org.moxie.confer.proxy.tools.documents;
 
-import org.moxie.confer.proxy.tools.ToolAttachment;
+import org.moxie.confer.proxy.images.ImageReference;
 
 import java.util.List;
 import java.util.Objects;
 
-public record DocumentToolOutput<T>(T content, List<ToolAttachment> attachments) {
+public record DocumentToolOutput<T>(T content, List<ImageReference> images) {
 
   public DocumentToolOutput {
     Objects.requireNonNull(content, "content");
-    attachments = List.copyOf(attachments);
+    images = List.copyOf(images);
   }
 
   public DocumentToolOutput(T content) {
