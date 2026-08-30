@@ -7,7 +7,7 @@
 
     <groupId>org.moxie</groupId>
     <artifactId>proxy</artifactId>
-    <version>0.1.17</version>
+    <version>0.1.18</version>
     <packaging>jar</packaging>
 
     <properties>
