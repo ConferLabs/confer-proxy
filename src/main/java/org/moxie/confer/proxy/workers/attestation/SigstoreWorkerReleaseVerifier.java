@@ -26,7 +26,7 @@ public class SigstoreWorkerReleaseVerifier {
 
   private static final boolean USE_STAGING_SIGSTORE = false;
 
-  static final String SIGNER = "worker-image-releases@conferlabs.iam.gserviceaccount.com";
+  static final String SIGNER = "worker-releases@conferlabs.iam.gserviceaccount.com";
   private static final String ISSUER = "https://accounts.google.com";
 
   private static final String PRODUCTION_ROOT = "/META-INF/sigstore-production-trusted-root.json";
@@ -145,7 +145,6 @@ public class SigstoreWorkerReleaseVerifier {
   }
 
   private record ReleaseManifest(String          artifactType,
-                                 String          archiveSha256,
                                  String          imageVersion,
                                  TdxMeasurements tdxMeasurements,
                                  int             version)

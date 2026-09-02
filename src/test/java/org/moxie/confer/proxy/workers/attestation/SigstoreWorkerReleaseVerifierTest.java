@@ -38,10 +38,13 @@ class SigstoreWorkerReleaseVerifierTest {
   @Test
   void requiresTheWorkerImageReleaseIdentity() {
     assertEquals(
-        "worker-image-releases@conferlabs.iam.gserviceaccount.com",
+        "worker-releases@conferlabs.iam.gserviceaccount.com",
         SigstoreWorkerReleaseVerifier.SIGNER);
     assertNotEquals(
         "releases@conferlabs.iam.gserviceaccount.com",
+        SigstoreWorkerReleaseVerifier.SIGNER);
+    assertNotEquals(
+        "worker-image-releases@conferlabs.iam.gserviceaccount.com",
         SigstoreWorkerReleaseVerifier.SIGNER);
   }
 
@@ -140,8 +143,8 @@ class SigstoreWorkerReleaseVerifierTest {
     assertDoesNotThrow(() -> staging.verify(manifest, bundle, claims));
 
     String modified = manifest.replace(
-        "\"imageVersion\":\"0.1.0-RC11\"",
-        "\"imageVersion\":\"0.1.0-RC12\"");
+        "\"imageVersion\":\"0.1.1-RC1\"",
+        "\"imageVersion\":\"0.1.1-RC2\"");
     assertThrows(
         WorkerException.class,
         () -> staging.verify(modified, bundle, claims));
@@ -278,7 +281,6 @@ class SigstoreWorkerReleaseVerifierTest {
     return """
         {
           "artifactType":"confer-worker-image",
-          "archiveSha256":"%s",
           "imageVersion":"0.1.0-SNAPSHOT",
           "tdxMeasurements":{
             "mrtd":"%s",
@@ -289,7 +291,6 @@ class SigstoreWorkerReleaseVerifierTest {
           "version":1
         }
         """.formatted(
-            "0".repeat(64),
             hex('a'),
             hex('b'),
             hex('c'),
