@@ -60,11 +60,28 @@ public abstract class AttestationService {
   public byte[] getRawPublicKey() {
     if (serverKeyPair.getPublic() instanceof java.security.interfaces.XECPublicKey xecKey) {
       byte[] uArr = xecKey.getU().toByteArray();
-      byte[] raw  = new byte[32];
+      // BigInteger.toByteArray() may have a leading zero byte for positive numbers
+      // or omit leading zeros for small numbers. X25519 requires exactly 32 bytes.
+      if (uArr.length > 33) {
+        throw new IllegalStateException("Expected XECPublicKey with at most 33 bytes but got " + uArr.length + " bytes");
+      }
 
-      // Reverse byte order: BigInteger is big-endian, X25519 uses little-endian
-      for (int i = 0; i < uArr.length && i < 32; i++) {
-        raw[i] = uArr[uArr.length - 1 - i];
+      byte[] raw = new byte[32];
+
+      // Handle potential leading zero byte from BigInteger encoding
+      int srcOffset = 0;
+      if (uArr.length == 33) {
+        if (uArr[0] != 0) {
+          throw new IllegalStateException("Expected leading zero byte but got non-zero value");
+        }
+        srcOffset = 1;
+      }
+
+      int copyLength = uArr.length - srcOffset;
+
+      // Copy with padding and reversal: BigInteger is big-endian, X25519 uses little-endian
+      for (int i = 0; i < copyLength; i++) {
+        raw[i] = uArr[srcOffset + copyLength - 1 - i];
       }
 
       return raw;
