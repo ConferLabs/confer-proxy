@@ -21,6 +21,7 @@ class TdxQuoteTest {
     fill(quote, 376, 48, 0x22);
     fill(quote, 424, 48, 0x33);
     fill(quote, 472, 48, 0x44);
+    fill(quote, 520, 48, 0x66);
     fill(quote, 568, 64, 0x55);
 
     WorkerTdxClaims claims = TdxQuote.parse(quote).getClaims();
@@ -29,6 +30,7 @@ class TdxQuoteTest {
     assertEquals("22".repeat(48), claims.rtmr0());
     assertEquals("33".repeat(48), claims.rtmr1());
     assertEquals("44".repeat(48), claims.rtmr2());
+    assertEquals("66".repeat(48), claims.rtmr3());
     assertEquals("55".repeat(64), claims.reportData());
     assertFalse(claims.debuggable());
     assertFalse(claims.migratable());

@@ -12,7 +12,8 @@ public record DocumentTextWindow(int containerStart,
                                  int containerEnd,
                                  int totalContainers,
                                  List<DocumentRegionReference> regions,
-                                 List<DocumentContainerReference> containers)
+                                 List<DocumentContainerReference> containers,
+                                 boolean truncated)
 {
   public DocumentTextWindow {
     regions = List.copyOf(regions);

@@ -37,12 +37,19 @@ import org.moxie.confer.proxy.workers.WorkerInputSource;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.stream.Gatherers;
+import java.util.stream.IntStream;
 
 public class DocumentToolSession implements WorkerInputSource {
 
   private static final String LEGACY_WARNING =
       "This older attachment uses its extracted-text fallback; visual pages are unavailable.";
+
+  private static final String TRUNCATED_WARNING =
+      "This page is longer than one read returns, so only its beginning is included. "
+      + "Search the document to find text later on this page.";
 
   private static final String PAGE_ATTACHED_MESSAGE =
       "The rendered page is attached to the next model turn.";
@@ -158,7 +165,7 @@ public class DocumentToolSession implements WorkerInputSource {
                   region.confidence()))
               .toList(),
           text.text(),
-          legacyWarning(connection, reference));
+          text.window().truncated() ? TRUNCATED_WARNING : legacyWarning(connection, reference));
     }
   }
 
@@ -210,47 +217,57 @@ public class DocumentToolSession implements WorkerInputSource {
     throws IOException
   {
     try (DocumentWorkerLease worker = workers.acquire()) {
-      DocumentWorkerConnection connection = worker.connection();
-      DocumentSearchResult     search     = connection.search(
-          reference,
-          queries,
-          snippetCharacters);
-
-      return new DocumentSearchDocumentResult(
-          reference.attachmentId(),
-          reference.filename(),
-          search.hits().stream().map(this::searchMatch).toList(),
-          search.hasMore(),
-          search.hits().size(),
-          legacyWarning(connection, reference));
+      return searchDocument(worker.connection(), reference, queries, snippetCharacters);
     }
+  }
+
+  private DocumentSearchDocumentResult searchDocument(DocumentWorkerConnection connection,
+                                                       DocumentReference reference,
+                                                       List<DocumentSearchQuery> queries,
+                                                       int snippetCharacters)
+    throws IOException
+  {
+    DocumentSearchResult search = connection.search(
+        reference,
+        queries,
+        snippetCharacters);
+
+    return new DocumentSearchDocumentResult(
+        reference.attachmentId(),
+        reference.filename(),
+        search.hits().stream().map(this::searchMatch).toList(),
+        search.hasMore(),
+        search.hits().size(),
+        legacyWarning(connection, reference));
   }
 
   private DocumentSearchCollectionResult searchAll(List<DocumentReference> references,
                                                     List<DocumentSearchQuery> queries,
                                                     int snippetCharacters)
   {
+    CollectionSearch search    = new CollectionSearch(references, queries, snippetCharacters);
+    int              processes = Math.min(workers.getMaxConnections(), references.size());
+
+    IntStream.range(0, processes)
+        .boxed()
+        .gather(Gatherers.mapConcurrent(processes, process -> search.run()))
+        .toList();
+
     List<DocumentSearchDocumentResult> searches = new ArrayList<>();
     List<DocumentSearchFailure>        failures = new ArrayList<>();
-
-    int concurrency = Math.max(1, references.size());
-    references.stream()
-        .gather(Gatherers.mapConcurrent(
-            concurrency,
-            reference -> trySearchDocument(reference, queries, snippetCharacters)))
-        .forEachOrdered(result -> result.ifSuccessOrElse(
-            searches::add,
-            failures::add));
+    for (int index = 0; index < references.size(); index++) {
+      search.results.get(index).ifSuccessOrElse(searches::add, failures::add);
+    }
 
     List<DocumentSearchFileResult> files = searches.stream()
-        .filter(search -> !search.hits().isEmpty())
-        .map(search -> new DocumentSearchFileResult(
-            search.attachmentId(),
-            search.filename(),
-            search.matchCount(),
-            search.hasMoreResults(),
-            search.warning(),
-            search.hits()))
+        .filter(result -> !result.hits().isEmpty())
+        .map(result -> new DocumentSearchFileResult(
+            result.attachmentId(),
+            result.filename(),
+            result.matchCount(),
+            result.hasMoreResults(),
+            result.warning(),
+            result.hits()))
         .toList();
 
     int matches = searches.stream()
@@ -273,18 +290,87 @@ public class DocumentToolSession implements WorkerInputSource {
         message);
   }
 
-  private Result<DocumentSearchDocumentResult, DocumentSearchFailure> trySearchDocument(
-      DocumentReference reference,
-      List<DocumentSearchQuery> queries,
-      int snippetCharacters)
-  {
-    try {
-      return Result.success(searchDocument(reference, queries, snippetCharacters));
-    } catch (IOException error) {
+  /**
+   * One search across a collection, shared by a few worker processes that each
+   * take the next unsearched document until none remain. Starting a process
+   * costs far more than searching one document. A failed search replaces its
+   * process, since the process's protocol state is unknown; a process that
+   * cannot be started means the worker connection is unavailable, so the
+   * remaining documents fail without further attempts.
+   */
+  private final class CollectionSearch {
+
+    private final List<DocumentReference>   references;
+    private final List<DocumentSearchQuery> queries;
+    private final int                       snippetCharacters;
+    private final AtomicInteger             next = new AtomicInteger();
+
+    private final AtomicReferenceArray<Result<DocumentSearchDocumentResult, DocumentSearchFailure>> results;
+
+    private volatile boolean unavailable;
+
+    private CollectionSearch(List<DocumentReference> references,
+                             List<DocumentSearchQuery> queries,
+                             int snippetCharacters)
+    {
+      this.references        = references;
+      this.queries           = queries;
+      this.snippetCharacters = snippetCharacters;
+      this.results           = new AtomicReferenceArray<>(references.size());
+    }
+
+    private boolean run() {
+      DocumentWorkerLease worker = null;
+      try {
+        int index;
+        while ((index = next.getAndIncrement()) < references.size()) {
+          DocumentReference reference = references.get(index);
+
+          if (worker == null && !unavailable) {
+            try {
+              worker = workers.acquire();
+            } catch (IOException error) {
+              unavailable = true;
+            }
+          }
+          if (worker == null) {
+            results.set(index, failure(reference));
+            continue;
+          }
+
+          try {
+            results.set(index, Result.success(
+                searchDocument(worker.connection(), reference, queries, snippetCharacters)));
+          } catch (IOException error) {
+            results.set(index, failure(reference));
+            worker = discard(worker);
+            continue;
+          }
+
+          try {
+            worker.connection().release(reference);
+          } catch (IOException error) {
+            worker = discard(worker);
+          }
+        }
+        return true;
+      } finally {
+        discard(worker);
+      }
+    }
+
+    private Result<DocumentSearchDocumentResult, DocumentSearchFailure> failure(DocumentReference reference) {
       return Result.failure(new DocumentSearchFailure(
           reference.attachmentId(),
           reference.filename(),
           RETRIEVAL_FAILED));
+    }
+
+    private DocumentWorkerLease discard(DocumentWorkerLease worker) {
+      if (worker != null) {
+        worker.close();
+      }
+      return null;
     }
   }
 

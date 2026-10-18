@@ -8,6 +8,7 @@ import jakarta.websocket.WebSocketContainer;
 import org.moxie.confer.proxy.attachments.AttachmentPublisher;
 import org.moxie.confer.proxy.auth.JWT;
 import org.moxie.confer.proxy.config.Config;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerSchedulers;
 import org.moxie.confer.proxy.lifecycle.ManagedResource;
 import org.moxie.confer.proxy.workers.attestation.DcapWorkerQuoteVerifier;
 import org.moxie.confer.proxy.workers.attestation.SigstoreWorkerReleaseVerifier;
@@ -24,18 +25,21 @@ public class WorkerClient {
   private final JWT                        jwt;
   private final WorkerAttestationHandshake attestation;
   private final AttachmentPublisher        attachments;
+  private final DocumentWorkerSchedulers   documentSchedulers;
 
   @Inject
-  public WorkerClient(ObjectMapper        mapper,
-                      Config              config,
-                      AttachmentPublisher attachments)
+  public WorkerClient(ObjectMapper             mapper,
+                      Config                   config,
+                      AttachmentPublisher      attachments,
+                      DocumentWorkerSchedulers documentSchedulers)
   {
     this(ContainerProvider.getWebSocketContainer(),
          getControllerUri(config.getWorkerControllerUri()),
          mapper,
          new JWT(config.getJwtSecret()),
          new WorkerAttestationHandshake(mapper, getQuoteVerifier(mapper)),
-         attachments);
+         attachments,
+         documentSchedulers);
   }
 
   WorkerClient(WebSocketContainer         webSockets,
@@ -43,18 +47,24 @@ public class WorkerClient {
                ObjectMapper               mapper,
                JWT                        jwt,
                WorkerAttestationHandshake attestation,
-               AttachmentPublisher        attachments)
+               AttachmentPublisher        attachments,
+               DocumentWorkerSchedulers   documentSchedulers)
   {
-    this.webSockets    = webSockets;
-    this.controllerUri = controllerUri;
-    this.mapper        = mapper;
-    this.jwt           = jwt;
-    this.attestation   = attestation;
-    this.attachments   = attachments;
+    this.webSockets         = webSockets;
+    this.controllerUri      = controllerUri;
+    this.mapper             = mapper;
+    this.jwt                = jwt;
+    this.attestation        = attestation;
+    this.attachments        = attachments;
+    this.documentSchedulers = documentSchedulers;
   }
 
   public WorkerWorkspace getWorkspace(String attachmentPrefix) {
-    return new WorkerWorkspace(new Session(attachmentPrefix), attachments, attachmentPrefix);
+    return new WorkerWorkspace(
+        new Session(attachmentPrefix),
+        attachments,
+        documentSchedulers,
+        attachmentPrefix);
   }
 
   private static WorkerQuoteVerifier getQuoteVerifier(ObjectMapper mapper)

@@ -9,7 +9,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.documents.DecryptedDocument;
 import org.moxie.confer.proxy.documents.DocumentNotFoundException;
 import org.moxie.confer.proxy.documents.DocumentStorageGateway;
@@ -27,7 +26,10 @@ import org.moxie.confer.proxy.documents.worker.responses.DocumentExtractionMetad
 import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponse;
 import org.moxie.confer.proxy.documents.worker.responses.DocumentWorkerResponsePayload;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
+import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
+import org.moxie.confer.proxy.workers.WorkerClient;
+import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -36,6 +38,7 @@ import java.io.InputStream;
 import java.io.StreamCorruptedException;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -46,6 +49,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class DocumentExtractionHandlerTest {
 
@@ -55,7 +60,7 @@ class DocumentExtractionHandlerTest {
 
   private TestDocumentWorkerGateway workerGateway;
   private RecordingStorage          storage;
-  private TestConfig                config;
+  private WebsocketConnectionContext context;
   private ObjectMapper              mapper;
   private DocumentExtractionHandler handler;
 
@@ -73,15 +78,18 @@ class DocumentExtractionHandlerTest {
   void setUp() throws ReflectiveOperationException {
     workerGateway = new TestDocumentWorkerGateway();
     storage = new RecordingStorage();
-    config = new TestConfig();
     mapper = new ObjectMapper();
     handler = new DocumentExtractionHandler();
     setField(handler, "mapper", mapper);
     setField(handler, "validator", validatorFactory.getValidator());
-    setField(handler, "extractor", new StoredDocumentExtractor(
-        storage,
-        storage,
-        new DocumentWorkerScheduler(config, workerGateway)));
+    setField(handler, "extractor", new StoredDocumentExtractor(storage, storage));
+
+    WorkerClient    workerClient = mock(WorkerClient.class);
+    WorkerWorkspace workspace    = mock(WorkerWorkspace.class);
+    context = mock(WebsocketConnectionContext.class);
+    when(context.getWorkerWorkspace(workerClient)).thenReturn(workspace);
+    when(workspace.getDocumentWorkers()).thenReturn(new DocumentWorkerScheduler(workerGateway, 8, Duration.ofSeconds(1)));
+    setField(handler, "workerClient", workerClient);
   }
 
   @Test
@@ -95,7 +103,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, request));
+        () -> handler.handle(context, request));
 
     assertEquals(400, error.getResponse().getStatus());
   }
@@ -113,7 +121,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, request));
+        () -> handler.handle(context, request));
 
     assertEquals(400, error.getResponse().getStatus());
   }
@@ -122,7 +130,7 @@ class DocumentExtractionHandlerTest {
   void legacyOfficeFormatReturns415() {
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.doc", "application/msword", 1)));
+        () -> handler.handle(context, storedRequest("test.doc", "application/msword", 1)));
 
     assertEquals(415, error.getResponse().getStatus());
   }
@@ -145,7 +153,7 @@ class DocumentExtractionHandlerTest {
     workerGateway.respondWith(connection(successResponse(), requests));
 
     WebsocketHandlerResponse handlerResponse = handler.handle(
-        null,
+        context,
         storedRequest("test.pdf", "application/pdf", source.length));
     WebsocketHandlerResponse.StreamingResponse streaming = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
@@ -188,7 +196,7 @@ class DocumentExtractionHandlerTest {
     WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
         handler.handle(
-            null,
+            context,
             storedRequest("test.pdf", "application/pdf", source.length)));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     try (response) {
@@ -215,7 +223,7 @@ class DocumentExtractionHandlerTest {
     WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
         handler.handle(
-            null,
+            context,
             storedRequest("test.pdf", "application/pdf", source.length, text.length())));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     try (response) {
@@ -236,7 +244,7 @@ class DocumentExtractionHandlerTest {
     WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
         handler.handle(
-            null,
+            context,
             storedRequest("test.pdf", "application/pdf", source.length, 0)));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     try (response) {
@@ -254,7 +262,7 @@ class DocumentExtractionHandlerTest {
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
         () -> handler.handle(
-            null,
+            context,
             storedRequest("test.pdf", "application/pdf", 1, -1)));
 
     assertEquals(400, error.getResponse().getStatus());
@@ -265,7 +273,7 @@ class DocumentExtractionHandlerTest {
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
         () -> handler.handle(
-            null,
+            context,
             storedRequestWithInlineLimit(
                 "test.pdf",
                 "application/pdf",
@@ -285,7 +293,7 @@ class DocumentExtractionHandlerTest {
     WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
         handler.handle(
-            null,
+            context,
             storedRequest(
                 "test.pdf",
                 "application/pdf",
@@ -309,7 +317,7 @@ class DocumentExtractionHandlerTest {
     WebsocketHandlerResponse.StreamingResponse response = assertInstanceOf(
         WebsocketHandlerResponse.StreamingResponse.class,
         handler.handle(
-            null,
+            context,
             storedRequest("test.pdf", "application/pdf", source.length)));
     ByteArrayOutputStream output = new ByteArrayOutputStream();
     try (response) {
@@ -329,7 +337,7 @@ class DocumentExtractionHandlerTest {
     workerGateway.respondWith(connection(successResponse(), requests));
 
     WebsocketHandlerResponse response = handler.handle(
-        null,
+        context,
         storedRequest(
             "test.docx",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -357,7 +365,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(422, error.getResponse().getStatus());
   }
@@ -368,7 +376,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(422, error.getResponse().getStatus());
   }
@@ -382,7 +390,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(422, error.getResponse().getStatus());
   }
@@ -394,7 +402,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(502, error.getResponse().getStatus());
   }
@@ -406,7 +414,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(502, error.getResponse().getStatus());
   }
@@ -419,7 +427,7 @@ class DocumentExtractionHandlerTest {
 
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, storedRequest("test.pdf", "application/pdf", 1)));
+        () -> handler.handle(context, storedRequest("test.pdf", "application/pdf", 1)));
 
     assertEquals(502, error.getResponse().getStatus());
     assertArrayEquals(
@@ -470,7 +478,7 @@ class DocumentExtractionHandlerTest {
   private void assertBadRequest(WebsocketRequest request) {
     WebApplicationException error = assertThrows(
         WebApplicationException.class,
-        () -> handler.handle(null, request));
+        () -> handler.handle(context, request));
 
     assertEquals(400, error.getResponse().getStatus());
   }
@@ -548,19 +556,6 @@ class DocumentExtractionHandlerTest {
     Field field = target.getClass().getDeclaredField(name);
     field.setAccessible(true);
     field.set(target, value);
-  }
-
-  private static class TestConfig extends Config {
-
-    @Override
-    public int getDocumentWorkerMaxConnections() {
-      return 8;
-    }
-
-    @Override
-    public long getDocumentWorkerAcquireTimeoutSeconds() {
-      return 1;
-    }
   }
 
   private static class RecordingStorage

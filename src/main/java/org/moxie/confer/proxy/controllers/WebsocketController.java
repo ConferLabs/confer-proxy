@@ -5,6 +5,8 @@ import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
 import jakarta.inject.Named;
 import jakarta.websocket.CloseReason;
+import jakarta.websocket.OnClose;
+import jakarta.websocket.OnError;
 import jakarta.websocket.Session;
 import jakarta.websocket.server.ServerEndpoint;
 import jakarta.ws.rs.WebApplicationException;
@@ -43,9 +45,6 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   DocumentExtractionHandler documentExtractionHandler;
 
   @Inject
-  LegacyDocumentExtractionHandler legacyDocumentExtractionHandler;
-
-  @Inject
   EmbeddingHandler embeddingHandler;
 
   @Inject
@@ -62,7 +61,6 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   @PostConstruct
   void initializeRoutes() {
     routes.put(new Route("POST", "/v1/vllm/chat/completions"), vllmWebsocketHandler);
-    routes.put(new Route("POST", "/v1/document/extract"), legacyDocumentExtractionHandler);
     routes.put(new Route("POST", "/v2/document/extract"), documentExtractionHandler);
     routes.put(new Route("POST", "/v1/embeddings"), embeddingHandler);
     routes.put(new Route("POST", "/v1/fetch/html"), externalProxyFetchHandler);
@@ -70,12 +68,14 @@ public class WebsocketController extends NoiseConnectionWebsocket {
   }
 
   @Override
+  @OnClose
   public void onClose(Session session, CloseReason closeReason) {
     super.onClose(session, closeReason);
     closeConnectionContext(session);
   }
 
   @Override
+  @OnError
   public void onError(Session session, Throwable throwable) {
     super.onError(session, throwable);
     failConnection(session, "WebSocket error");

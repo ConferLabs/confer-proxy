@@ -1,13 +1,18 @@
 package org.moxie.confer.proxy.workers;
 
+import com.jcraft.jsch.ChannelExec;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.moxie.confer.proxy.attachments.AttachmentPublisher;
+import org.moxie.confer.proxy.attachments.AttachmentReference;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerSchedulers;
 import org.moxie.confer.proxy.documents.DecryptedDocument;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -188,6 +193,7 @@ class WorkerWorkspaceTest {
     WorkerWorkspace workspace = new WorkerWorkspace(
         session,
         mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
         "generated-attachments");
     WorkerWorkspace.Input binding = new WorkerWorkspace.Input(
         "source",
@@ -223,6 +229,7 @@ class WorkerWorkspaceTest {
     WorkerWorkspace workspace = new WorkerWorkspace(
         session,
         mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
         "generated-attachments");
 
     assertSame(disconnected, assertThrows(
@@ -455,6 +462,7 @@ class WorkerWorkspaceTest {
     WorkerWorkspace workspace = new WorkerWorkspace(
         session,
         mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
         "generated-attachments");
     CountDownLatch active = new CountDownLatch(1);
     CountDownLatch closed = new CountDownLatch(1);
@@ -506,6 +514,103 @@ class WorkerWorkspaceTest {
     verify(session).close();
   }
 
+  @Test
+  void startsAProcessWhileACommandHoldsTheWorkspace() throws Exception {
+    WorkerConnection connection = mock(WorkerConnection.class);
+    WorkerClient.Session session = mock(WorkerClient.Session.class);
+    WorkerProcess process = new WorkerProcess(
+        mock(ChannelExec.class),
+        new ByteArrayInputStream(new byte[0]),
+        OutputStream.nullOutputStream());
+    WorkerWorkspace workspace = new WorkerWorkspace(
+        session,
+        mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
+        "generated-attachments");
+    CountDownLatch running = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    when(session.getConnection()).thenReturn(connection);
+    when(connection.startProcess("document")).thenReturn(process);
+    doAnswer(invocation -> {
+      running.countDown();
+      assertTrue(release.await(1, TimeUnit.SECONDS));
+      return new WorkerCommandResult(0, "", false);
+    }).when(connection).execute("long-running");
+    Thread command = Thread.ofPlatform().start(() -> {
+      try {
+        workspace.execute("long-running", List.of(), mock(WorkerInputSource.class));
+      } catch (WorkerException error) {
+        throw new AssertionError(error);
+      }
+    });
+
+    try {
+      assertTrue(running.await(1, TimeUnit.SECONDS));
+      assertSame(process, workspace.startProcess("document"));
+      assertTrue(command.isAlive());
+    } finally {
+      release.countDown();
+      command.join(TimeUnit.SECONDS.toMillis(1));
+    }
+  }
+
+  @Test
+  void createsOneDocumentSchedulerPerWorkspace() {
+    DocumentWorkerSchedulers schedulers = mock(DocumentWorkerSchedulers.class);
+    DocumentWorkerScheduler  scheduler  = mock(DocumentWorkerScheduler.class);
+    WorkerWorkspace workspace = new WorkerWorkspace(
+        mock(WorkerClient.Session.class),
+        mock(AttachmentPublisher.class),
+        schedulers,
+        "generated-attachments");
+    when(schedulers.forWorkspace(workspace)).thenReturn(scheduler);
+
+    assertSame(scheduler, workspace.getDocumentWorkers());
+    assertSame(scheduler, workspace.getDocumentWorkers());
+    verify(schedulers, times(1)).forWorkspace(workspace);
+  }
+
+  @Test
+  void publishesFilesWithTheWorkspaceDocumentScheduler() throws Exception {
+    WorkerConnection         connection  = mock(WorkerConnection.class);
+    WorkerClient.Session     session     = mock(WorkerClient.Session.class);
+    AttachmentPublisher      attachments = mock(AttachmentPublisher.class);
+    DocumentWorkerSchedulers schedulers  = mock(DocumentWorkerSchedulers.class);
+    DocumentWorkerScheduler  scheduler   = mock(DocumentWorkerScheduler.class);
+    InputStream              content     = new ByteArrayInputStream(new byte[] {1});
+    AttachmentReference      reference   = mock(AttachmentReference.class);
+    WorkerWorkspace workspace = new WorkerWorkspace(
+        session,
+        attachments,
+        schedulers,
+        "generated-attachments");
+    when(session.getConnection()).thenReturn(connection);
+    when(schedulers.forWorkspace(workspace)).thenReturn(scheduler);
+    when(connection.openFile("report.pdf", AttachmentPublisher.MAX_BYTES))
+        .thenReturn(new WorkerConnection.OpenFile(content, "report.pdf", () -> {}));
+    when(attachments.publish("generated-attachments", "report.pdf", content, scheduler))
+        .thenReturn(reference);
+
+    assertSame(reference, workspace.publishFile("report.pdf"));
+  }
+
+  @Test
+  void aClosedWorkspaceStartsNoProcess() {
+    WorkerClient.Session session = mock(WorkerClient.Session.class);
+    WorkerWorkspace workspace = new WorkerWorkspace(
+        session,
+        mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
+        "generated-attachments");
+
+    workspace.close();
+
+    WorkerException error = assertThrows(
+        WorkerException.class,
+        () -> workspace.startProcess("document"));
+    assertEquals("Worker workspace is closed", error.getMessage());
+  }
+
   private static void execute(TestWorkspace              workspace,
                               String                     command,
                               CountDownLatch             started,
@@ -537,6 +642,7 @@ class WorkerWorkspaceTest {
     WorkerWorkspace workspace = new WorkerWorkspace(
         session,
         mock(AttachmentPublisher.class),
+        mock(DocumentWorkerSchedulers.class),
         "generated-attachments");
     return new TestWorkspace(workspace, source);
   }

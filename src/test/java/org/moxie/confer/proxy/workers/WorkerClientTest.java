@@ -5,6 +5,7 @@ import jakarta.websocket.WebSocketContainer;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedConstruction;
 import org.moxie.confer.proxy.attachments.AttachmentPublisher;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerSchedulers;
 import org.moxie.confer.proxy.auth.JWT;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.producers.ObjectMapperProducer;
@@ -49,7 +50,8 @@ class WorkerClientTest {
         () -> new WorkerClient(
             new ObjectMapperProducer().produceObjectMapper(),
             config,
-            mock(AttachmentPublisher.class)));
+            mock(AttachmentPublisher.class),
+            mock(DocumentWorkerSchedulers.class)));
   }
 
   @Test
@@ -335,7 +337,8 @@ class WorkerClientTest {
         mapper,
         jwt,
         attestation,
-        attachments);
+        attachments,
+        mock(DocumentWorkerSchedulers.class));
 
     private Fixture() {
       when(jwt.generate(SUBJECT)).thenReturn(TOKEN);

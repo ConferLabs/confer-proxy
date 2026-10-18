@@ -6,7 +6,6 @@ import jakarta.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.documents.requests.DocumentOverviewRequest;
 import org.moxie.confer.proxy.documents.requests.DocumentPageViewRequest;
 import org.moxie.confer.proxy.documents.requests.DocumentReadRequest;
@@ -37,6 +36,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -54,7 +54,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -62,6 +64,7 @@ import static org.mockito.Mockito.when;
 class DocumentToolSessionTest {
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(1);
   private static final String KEY = Base64.getEncoder().encodeToString(new byte[32]);
   private static final ImageReference IMAGE = imageReference();
   private static final List<DocumentSearchQuery> SEARCH_QUERIES =
@@ -191,10 +194,29 @@ class DocumentToolSessionTest {
     assertEquals(2, read.pageNumber());
     assertEquals(3, read.totalPages());
     assertEquals("window text", read.text());
+    assertNull(read.warning());
     assertEquals(2, worker.connectionsOpened);
     assertEquals(
         List.of("user/doc.artifact", "user/doc.artifact"),
         storage.openedKeys);
+  }
+
+  @Test
+  void warnsWhenAPageIsLongerThanOneRead() throws Exception {
+    RecordingStorage storage = new RecordingStorage(Map.of("user/doc.artifact", new byte[] {1}));
+    RecordingWorker worker = RecordingWorker.scripted(storage, List.of(
+        List.of(
+            okResponse(),
+            readResponse(true),
+            okResponse())));
+
+    DocumentReadResult read = session(worker).read(new DocumentReadRequest("doc", 2, 1));
+
+    assertEquals("window text", read.text());
+    assertEquals(
+        "This page is longer than one read returns, so only its beginning is included. "
+            + "Search the document to find text later on this page.",
+        read.warning());
   }
 
   @Test
@@ -204,8 +226,9 @@ class DocumentToolSessionTest {
     when(connection.search(reference, SEARCH_QUERIES, 1_200))
         .thenReturn(searchResult("match"));
     DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(
-        new TestConfig(),
-        () -> connection);
+        () -> connection,
+        1,
+        ACQUIRE_TIMEOUT);
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(List.of(reference)),
         scheduler,
@@ -219,7 +242,7 @@ class DocumentToolSessionTest {
   }
 
   @Test
-  void searchesCollectionsInParallelAndClosesEveryConnection() throws Exception {
+  void searchesCollectionsInParallelOnSharedProcesses() throws Exception {
     List<DocumentReference> references = List.of(
         reference("first"),
         reference("second"),
@@ -269,7 +292,7 @@ class DocumentToolSessionTest {
     }
 
     DocumentWorkerGateway gateway = () -> connections.get(nextConnection.getAndIncrement());
-    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(new TestConfig(2), gateway);
+    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(gateway, 2, ACQUIRE_TIMEOUT);
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(references),
         scheduler,
@@ -281,7 +304,7 @@ class DocumentToolSessionTest {
 
     assertEquals(2, maximumSearches.get());
     assertTrue(virtualThreads.get());
-    assertEquals(4, nextConnection.get());
+    assertEquals(2, nextConnection.get());
     assertEquals(
         List.of("first", "second", "third", "fourth"),
         result.files().stream().map(file -> file.attachmentId()).toList());
@@ -290,13 +313,119 @@ class DocumentToolSessionTest {
     assertEquals(4, result.matchCount());
     assertTrue(result.truncated());
     assertTrue(result.failedFiles().isEmpty());
-    for (DocumentWorkerConnection connection : connections) {
-      verify(connection).search(
+    for (DocumentWorkerConnection connection : List.of(firstConnection, secondConnection)) {
+      verify(connection, times(2)).search(
           any(DocumentReference.class),
           eq(SEARCH_QUERIES),
           eq(512));
+      verify(connection, times(2)).release(any(DocumentReference.class));
       verify(connection).close();
     }
+    verifyNoInteractions(thirdConnection, fourthConnection);
+  }
+
+  @Test
+  void replacesTheProcessAfterACollectionSearchFails() throws Exception {
+    DocumentReference first  = reference("first");
+    DocumentReference failed = reference("failed");
+    DocumentReference last   = reference("last");
+    DocumentWorkerConnection brokenConnection      = mock(DocumentWorkerConnection.class);
+    DocumentWorkerConnection replacementConnection = mock(DocumentWorkerConnection.class);
+    List<DocumentWorkerConnection> connections = List.of(
+        brokenConnection,
+        replacementConnection);
+    for (DocumentWorkerConnection connection : connections) {
+      when(connection.search(
+          any(DocumentReference.class),
+          eq(SEARCH_QUERIES),
+          eq(512)))
+          .thenAnswer(invocation -> {
+            DocumentReference reference = invocation.getArgument(0);
+            if (reference.attachmentId().equals(failed.attachmentId())) {
+              throw new IOException("Search failed");
+            }
+            return searchResult(reference.attachmentId());
+          });
+    }
+    AtomicInteger nextConnection = new AtomicInteger();
+    DocumentWorkerGateway gateway = () -> connections.get(nextConnection.getAndIncrement());
+    DocumentToolSession session = new DocumentToolSession(
+        new DocumentManifest(List.of(first, failed, last)),
+        new DocumentWorkerScheduler(gateway, 1, ACQUIRE_TIMEOUT),
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
+
+    DocumentSearchCollectionResult result = (DocumentSearchCollectionResult) session.search(
+        new DocumentSearchRequest(SEARCH_QUERIES, null));
+
+    assertEquals(List.of("first", "last"),
+        result.files().stream().map(file -> file.attachmentId()).toList());
+    assertEquals(List.of("failed"),
+        result.failedFiles().stream().map(failure -> failure.attachmentId()).toList());
+    assertEquals(2, nextConnection.get());
+    verify(brokenConnection).release(first);
+    verify(brokenConnection).close();
+    verify(replacementConnection).search(last, SEARCH_QUERIES, 512);
+    verify(replacementConnection).release(last);
+    verify(replacementConnection).close();
+  }
+
+  @Test
+  void keepsASearchResultWhenReleasingItsDocumentFails() throws Exception {
+    DocumentReference first  = reference("first");
+    DocumentReference second = reference("second");
+    DocumentWorkerConnection releaseFails = mock(DocumentWorkerConnection.class);
+    DocumentWorkerConnection replacement  = mock(DocumentWorkerConnection.class);
+    for (DocumentWorkerConnection connection : List.of(releaseFails, replacement)) {
+      when(connection.search(any(DocumentReference.class), eq(SEARCH_QUERIES), eq(512)))
+          .thenAnswer(invocation -> searchResult(((DocumentReference) invocation.getArgument(0)).attachmentId()));
+    }
+    doThrow(new IOException("Release failed")).when(releaseFails).release(first);
+    List<DocumentWorkerConnection> connections = List.of(releaseFails, replacement);
+    AtomicInteger nextConnection = new AtomicInteger();
+    DocumentToolSession session = new DocumentToolSession(
+        new DocumentManifest(List.of(first, second)),
+        new DocumentWorkerScheduler(() -> connections.get(nextConnection.getAndIncrement()), 1, ACQUIRE_TIMEOUT),
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
+
+    DocumentSearchCollectionResult result = (DocumentSearchCollectionResult) session.search(
+        new DocumentSearchRequest(SEARCH_QUERIES, null));
+
+    assertEquals(List.of("first", "second"),
+        result.files().stream().map(file -> file.attachmentId()).toList());
+    assertTrue(result.failedFiles().isEmpty());
+    verify(releaseFails).close();
+    verify(replacement).search(second, SEARCH_QUERIES, 512);
+    verify(replacement).close();
+  }
+
+  @Test
+  void failsTheRestOfACollectionSearchWhenNoProcessCanStart() throws Exception {
+    List<DocumentReference> references = List.of(
+        reference("first"),
+        reference("second"),
+        reference("third"),
+        reference("fourth"));
+    AtomicInteger attempts = new AtomicInteger();
+    DocumentWorkerGateway gateway = () -> {
+      attempts.incrementAndGet();
+      throw new IOException("Unable to start a remote document worker");
+    };
+    DocumentToolSession session = new DocumentToolSession(
+        new DocumentManifest(references),
+        new DocumentWorkerScheduler(gateway, 2, ACQUIRE_TIMEOUT),
+        png -> IMAGE,
+        mock(DocumentStorageGateway.class));
+
+    DocumentSearchCollectionResult result = (DocumentSearchCollectionResult) session.search(
+        new DocumentSearchRequest(SEARCH_QUERIES, null));
+
+    assertTrue(attempts.get() <= 2, "attempts=" + attempts.get());
+    assertEquals(List.of("first", "second", "third", "fourth"),
+        result.failedFiles().stream().map(failure -> failure.attachmentId()).toList());
+    assertTrue(result.files().isEmpty());
+    assertTrue(result.partial());
   }
 
   @Test
@@ -324,7 +453,7 @@ class DocumentToolSessionTest {
           });
     }
     DocumentWorkerGateway gateway = () -> connections.get(nextConnection.getAndIncrement());
-    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(new TestConfig(2), gateway);
+    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(gateway, 2, ACQUIRE_TIMEOUT);
     DocumentToolSession session = new DocumentToolSession(
         new DocumentManifest(List.of(successfulReference, failedReference)),
         scheduler,
@@ -452,7 +581,7 @@ class DocumentToolSessionTest {
         "user/doc",
         KEY,
         null);
-    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(new TestConfig(), worker);
+    DocumentWorkerScheduler scheduler = new DocumentWorkerScheduler(worker, 1, ACQUIRE_TIMEOUT);
     return new DocumentToolSession(
         new DocumentManifest(List.of(reference)),
         scheduler,
@@ -524,13 +653,18 @@ class DocumentToolSessionTest {
   }
 
   private static DocumentWorkerResponse<DocumentTextWindow> readResponse() {
+    return readResponse(false);
+  }
+
+  private static DocumentWorkerResponse<DocumentTextWindow> readResponse(boolean truncated) {
     return DocumentWorkerResponse.success(
         new DocumentTextWindow(
             1,
             1,
             3,
             List.of(),
-            List.of(new DocumentContainerReference(1, "page", "12"))),
+            List.of(new DocumentContainerReference(1, "page", "12")),
+            truncated),
         Map.of(
             DocumentWorkerPayloadRole.TEXT,
             payload(
@@ -648,29 +782,6 @@ class DocumentToolSessionTest {
           storage,
           MAPPER,
           validatorFactory.getValidator());
-    }
-  }
-
-  private static class TestConfig extends Config {
-
-    private final int maxConnections;
-
-    private TestConfig() {
-      this(1);
-    }
-
-    private TestConfig(int maxConnections) {
-      this.maxConnections = maxConnections;
-    }
-
-    @Override
-    public int getDocumentWorkerMaxConnections() {
-      return maxConnections;
-    }
-
-    @Override
-    public long getDocumentWorkerAcquireTimeoutSeconds() {
-      return 1;
     }
   }
 }

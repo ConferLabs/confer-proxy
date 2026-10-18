@@ -2,6 +2,7 @@ package org.moxie.confer.proxy.workers;
 
 import org.moxie.confer.proxy.attachments.AttachmentPublisher;
 import org.moxie.confer.proxy.attachments.AttachmentReference;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -32,9 +33,10 @@ class LocalAttachmentPublisher implements AttachmentPublisher {
   }
 
   @Override
-  public synchronized AttachmentReference publish(String      attachmentPrefix,
-                                                   String      filename,
-                                                   InputStream content)
+  public synchronized AttachmentReference publish(String                  attachmentPrefix,
+                                                   String                  filename,
+                                                   InputStream             content,
+                                                   DocumentWorkerScheduler documentWorkers)
       throws IOException
   {
     Objects.requireNonNull(attachmentPrefix, "attachmentPrefix");

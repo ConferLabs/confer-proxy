@@ -36,18 +36,20 @@ class WorkerAttestationHandshakeTest {
       throws Exception
   {
     AtomicReference<byte[]> reportData = new AtomicReference<>();
+    AtomicReference<byte[]> rtmr3 = new AtomicReference<>();
     AtomicReference<byte[]> challenge = new AtomicReference<>();
     AtomicBoolean verifierCalled = new AtomicBoolean();
 
     byte[] hostKey = verifyResponse(
         validDocument(),
         challenge,
-        (quote, expectedReportData, manifest, manifestBundle) -> {
+        (quote, expectedReportData, expectedRtmr3, manifest, manifestBundle) -> {
           assertArrayEquals(QUOTE, quote);
           assertEquals(MANIFEST, manifest);
           assertEquals(MANIFEST_BUNDLE, manifestBundle);
           verifierCalled.set(true);
           reportData.set(expectedReportData);
+          rtmr3.set(expectedRtmr3);
         });
 
     assertTrue(verifierCalled.get());
@@ -55,6 +57,18 @@ class WorkerAttestationHandshakeTest {
     assertArrayEquals(
         expectedReportData(challenge.get()),
         reportData.get());
+    assertArrayEquals(
+        expectedRtmr3(challenge.get()),
+        rtmr3.get());
+  }
+
+  @Test
+  void expectsAnRtmr3RecordingOnlyThisReservation() {
+    assertEquals(
+        "4f883dce24b9f83ba2671a5bbd1e168e3cd95562196bf782"
+        + "9bed8efd1ef0b3e65c4b84b3db5609b9ee5176de0d55d6d3",
+        HexFormat.of().formatHex(
+            WorkerAttestationHandshake.getExpectedRtmr3(HOST_KEY, CLIENT_KEY, CHALLENGE)));
   }
 
   @Test
@@ -63,7 +77,7 @@ class WorkerAttestationHandshakeTest {
         WorkerException.class,
         () -> verifyResponse(
             validDocument(),
-            (quote, reportData, manifest, manifestBundle) -> {
+            (quote, reportData, rtmr3, manifest, manifestBundle) -> {
               throw new WorkerException("untrusted worker");
             }));
   }
@@ -87,7 +101,7 @@ class WorkerAttestationHandshakeTest {
         IOException.class,
         () -> verifyResponse(
             document,
-            (quote, reportData, manifest, manifestBundle) ->
+            (quote, reportData, rtmr3, manifest, manifestBundle) ->
                 verifierCalled.set(true)));
 
     assertFalse(verifierCalled.get());
@@ -103,7 +117,7 @@ class WorkerAttestationHandshakeTest {
         IOException.class,
         () -> verifyResponse(
             document,
-            (quote, reportData, manifest, manifestBundle) -> {}));
+            (quote, reportData, rtmr3, manifest, manifestBundle) -> {}));
   }
 
   @Test
@@ -116,7 +130,7 @@ class WorkerAttestationHandshakeTest {
         IOException.class,
         () -> verifyResponse(
             document,
-            (quote, reportData, manifest, manifestBundle) -> {}));
+            (quote, reportData, rtmr3, manifest, manifestBundle) -> {}));
   }
 
   @Test
@@ -190,7 +204,7 @@ class WorkerAttestationHandshakeTest {
         IOException.class,
         () -> verifyResponse(
             document,
-            (quote, reportData, manifest, manifestBundle) ->
+            (quote, reportData, rtmr3, manifest, manifestBundle) ->
                 verifierCalled.set(true)));
 
     assertFalse(verifierCalled.get());
@@ -257,6 +271,21 @@ class WorkerAttestationHandshakeTest {
     digest.update(CLIENT_KEY);
     digest.update(challenge);
     return digest.digest();
+  }
+
+  private static byte[] expectedRtmr3(byte[] challenge)
+      throws Exception
+  {
+    MessageDigest reservation = MessageDigest.getInstance("SHA-384");
+    reservation.update("confer.worker.rtmr3.reservation.v1"
+                           .getBytes(StandardCharsets.US_ASCII));
+    reservation.update(HOST_KEY);
+    reservation.update(CLIENT_KEY);
+    reservation.update(challenge);
+    MessageDigest register = MessageDigest.getInstance("SHA-384");
+    register.update(new byte[48]);
+    register.update(reservation.digest());
+    return register.digest();
   }
 
   private static byte[] ed25519Key(byte value) {

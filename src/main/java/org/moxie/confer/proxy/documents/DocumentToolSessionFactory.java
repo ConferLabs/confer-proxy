@@ -11,21 +11,19 @@ import java.util.List;
 @ApplicationScoped
 public class DocumentToolSessionFactory {
 
-  private final DocumentWorkerScheduler workers;
-  private final TemporaryImageStorage   images;
-  private final DocumentStorageGateway  storage;
+  private final TemporaryImageStorage  images;
+  private final DocumentStorageGateway storage;
 
   @Inject
-  public DocumentToolSessionFactory(DocumentWorkerScheduler workers,
-                                    TemporaryImageStorage images,
+  public DocumentToolSessionFactory(TemporaryImageStorage  images,
                                     DocumentStorageGateway storage)
   {
-    this.workers = workers;
     this.images  = images;
     this.storage = storage;
   }
 
-  public DocumentToolSession open(List<DocumentReference> references)
+  public DocumentToolSession open(List<DocumentReference> references,
+                                  DocumentWorkerScheduler workers)
     throws InvalidDocumentManifestException
   {
     DocumentManifest manifest = new DocumentManifest(references);

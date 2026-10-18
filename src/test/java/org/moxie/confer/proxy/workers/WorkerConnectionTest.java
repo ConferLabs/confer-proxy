@@ -236,12 +236,27 @@ class WorkerConnectionTest {
   @Test
   void retiresTheWorkerWhenOpeningAnExecutionChannelFails() throws Exception {
     Fixture fixture = fixture();
+    when(fixture.session().isConnected()).thenReturn(true, false);
     when(fixture.session().openChannel("exec"))
         .thenThrow(new JSchException("session is down"));
 
     assertThrows(
         WorkerException.class,
         () -> fixture.connection().execute("printf unreachable"));
+
+    verify(fixture.session()).disconnect();
+    assertTrue(fixture.connection().isClosed());
+  }
+
+  @Test
+  void retiresTheWorkerWhenTheSessionDropsWhileOpeningAProcess() throws Exception {
+    Fixture fixture = fixture();
+    when(fixture.session().isConnected()).thenReturn(true, false);
+    when(fixture.session().openChannel("exec")).thenReturn(null);
+
+    assertThrows(
+        WorkerException.class,
+        () -> fixture.connection().startProcess("cat"));
 
     verify(fixture.session()).disconnect();
     assertTrue(fixture.connection().isClosed());
@@ -544,7 +559,7 @@ class WorkerConnectionTest {
   }
 
   @Test
-  void retiresTheWorkerWhenOpeningTheSftpChannelFails()
+  void keepsTheConnectionWhenOpeningTheSftpChannelFails()
       throws Exception
   {
     Fixture fixture = fixture();
@@ -556,16 +571,16 @@ class WorkerConnectionTest {
                      "report.pdf",
                      AttachmentPublisher.MAX_BYTES));
 
-    verify(fixture.session()).disconnect();
-    assertTrue(fixture.connection().isClosed());
+    verify(fixture.session(), never()).disconnect();
+    assertFalse(fixture.connection().isClosed());
   }
 
   @Test
-  void retiresTheWorkerWhenConnectingTheSftpChannelFails()
+  void keepsTheConnectionWhenTheWorkerRefusesAnSftpChannel()
       throws Exception
   {
     Fixture fixture = fixture();
-    doThrow(new JSchException("connect failed"))
+    doThrow(new JSchException("channel is not opened."))
         .when(fixture.sftp()).connect(10_000);
 
     assertThrows(WorkerException.class,
@@ -574,8 +589,8 @@ class WorkerConnectionTest {
                      AttachmentPublisher.MAX_BYTES));
 
     verify(fixture.sftp()).disconnect();
-    verify(fixture.session()).disconnect();
-    assertTrue(fixture.connection().isClosed());
+    verify(fixture.session(), never()).disconnect();
+    assertFalse(fixture.connection().isClosed());
   }
 
   @Test
@@ -629,6 +644,71 @@ class WorkerConnectionTest {
     when(fixture.sftp().get(absolutePath))
         .thenReturn(new ByteArrayInputStream(contents));
     return fixture;
+  }
+
+  @Test
+  void rejectsABlankProcessCommand() throws Exception {
+    Fixture fixture = fixture();
+
+    assertThrows(WorkerException.class, () -> fixture.connection().startProcess(null));
+    assertThrows(WorkerException.class, () -> fixture.connection().startProcess(" "));
+    verify(fixture.session(), never()).openChannel("exec");
+  }
+
+  @Test
+  void startsAProcessWithoutAnErrorStreamOrInputThread() throws Exception {
+    Fixture fixture = fixture();
+    ChannelExec execution = mock(ChannelExec.class);
+    InputStream standardOutput = mock(InputStream.class);
+    OutputStream standardInput = mock(OutputStream.class);
+    when(fixture.session().openChannel("exec")).thenReturn(execution);
+    when(execution.getInputStream()).thenReturn(standardOutput);
+    when(execution.getOutputStream()).thenReturn(standardInput);
+
+    try (WorkerProcess process = fixture.connection().startProcess("exec cat")) {
+      assertSame(standardOutput, process.getInputStream());
+      assertSame(standardInput, process.getOutputStream());
+      verify(execution).setCommand("exec cat");
+      InOrder order = inOrder(execution);
+      order.verify(execution).getInputStream();
+      order.verify(execution).connect(10_000);
+      verify(execution, never()).setErrStream(any(OutputStream.class));
+      verify(execution, never()).setInputStream(any(InputStream.class));
+      verify(execution, never()).disconnect();
+    }
+
+    verify(execution).disconnect();
+  }
+
+  @Test
+  void aRefusedProcessChannelKeepsTheConnection() throws Exception {
+    Fixture fixture = fixture();
+    ChannelExec execution = mock(ChannelExec.class);
+    when(fixture.session().openChannel("exec")).thenReturn(execution);
+    doThrow(new JSchException("channel is not opened.")).when(execution).connect(anyInt());
+
+    assertThrows(WorkerException.class,
+                 () -> fixture.connection().startProcess("exec cat"));
+
+    verify(execution).disconnect();
+    verify(fixture.session(), never()).disconnect();
+    assertFalse(fixture.connection().isClosed());
+  }
+
+  @Test
+  void aProcessThatFailsAfterTheSessionDropsClosesTheConnection() throws Exception {
+    Fixture fixture = fixture();
+    ChannelExec execution = mock(ChannelExec.class);
+    when(fixture.session().isConnected()).thenReturn(true, false);
+    when(fixture.session().openChannel("exec")).thenReturn(execution);
+    doThrow(new JSchException("session is down")).when(execution).connect(anyInt());
+
+    assertThrows(WorkerException.class,
+                 () -> fixture.connection().startProcess("exec cat"));
+
+    verify(execution).disconnect();
+    verify(fixture.session()).disconnect();
+    assertTrue(fixture.connection().isClosed());
   }
 
   private static ByteArrayOutputStream prepareUpload(Fixture fixture,

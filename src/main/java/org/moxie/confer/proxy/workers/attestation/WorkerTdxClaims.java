@@ -4,6 +4,7 @@ record WorkerTdxClaims(String mrtd,
                        String rtmr0,
                        String rtmr1,
                        String rtmr2,
+                       String rtmr3,
                        String reportData,
                        boolean debuggable,
                        boolean migratable)

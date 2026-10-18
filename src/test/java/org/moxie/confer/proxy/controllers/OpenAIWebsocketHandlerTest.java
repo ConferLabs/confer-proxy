@@ -161,7 +161,7 @@ class OpenAIWebsocketHandlerTest {
     lenient().when(config.getVllmServedModelName()).thenReturn("test-model");
     lenient().when(toolRegistry.forRequest(any(ToolEligibility.class)))
         .thenReturn(requestTools);
-    lenient().when(documentToolSessions.open(any())).thenReturn(emptyDocumentSession);
+    lenient().when(documentToolSessions.open(any(), any())).thenReturn(emptyDocumentSession);
     lenient().when(requestContext.getWorkerWorkspace(any()))
         .thenReturn(workerWorkspace);
     useServerTools(Map.of());
@@ -215,7 +215,7 @@ class OpenAIWebsocketHandlerTest {
         "POST",
         "/v1/chat/completions",
         Optional.of(mapper.writeValueAsString(chatRequest)));
-    when(documentToolSessions.open(List.of(reference)))
+    when(documentToolSessions.open(eq(List.of(reference)), any()))
         .thenThrow(new InvalidDocumentManifestException("Document reference is invalid"));
 
     WebsocketHandlerResponse.StreamingResponse response =
@@ -1884,7 +1884,7 @@ class OpenAIWebsocketHandlerTest {
     ChatCompletionChunk.Choice.Delta delta = mock(ChatCompletionChunk.Choice.Delta.class);
     StreamResponse<ChatCompletionChunk> streamResponse = mock(StreamResponse.class);
 
-    when(documentToolSessions.open(List.of(reference))).thenReturn(documentSession);
+    when(documentToolSessions.open(eq(List.of(reference)), any())).thenReturn(documentSession);
     when(fileSearch.getFunctionDefinition()).thenReturn(function);
     useServerTools(Map.of("file_search", fileSearch));
     when(openAIClient.chat()).thenReturn(chatService);

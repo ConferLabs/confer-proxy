@@ -20,24 +20,22 @@ import java.io.IOException;
 @ApplicationScoped
 public class StoredDocumentExtractor {
 
-  private final DocumentStorageGateway  storage;
-  private final DocumentStorageWriter   storageWriter;
-  private final DocumentWorkerScheduler workers;
+  private final DocumentStorageGateway storage;
+  private final DocumentStorageWriter  storageWriter;
 
   @Inject
-  public StoredDocumentExtractor(DocumentStorageGateway  storage,
-                                 DocumentStorageWriter   storageWriter,
-                                 DocumentWorkerScheduler workers)
+  public StoredDocumentExtractor(DocumentStorageGateway storage,
+                                 DocumentStorageWriter  storageWriter)
   {
     this.storage       = storage;
     this.storageWriter = storageWriter;
-    this.workers       = workers;
   }
 
-  public DocumentExtractionResult extract(DocumentDescriptor document,
-                                          DocumentObjectKeys objectKeys,
-                                          String encryptionKey,
-                                          int inlineTextMaxCharacters)
+  public DocumentExtractionResult extract(DocumentDescriptor      document,
+                                          DocumentObjectKeys      objectKeys,
+                                          String                  encryptionKey,
+                                          int                     inlineTextMaxCharacters,
+                                          DocumentWorkerScheduler workers)
       throws IOException
   {
     try (DocumentExtraction extraction = workers.extract(connection -> {

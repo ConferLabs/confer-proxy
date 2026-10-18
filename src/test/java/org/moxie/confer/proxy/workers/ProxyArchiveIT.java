@@ -19,7 +19,6 @@ import java.util.jar.Manifest;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -30,7 +29,7 @@ class ProxyArchiveIT {
   private static final String ARCHIVE_PROPERTY = "proxy.archive";
 
   @Test
-  void shippedArchiveContainsTheCompleteWorkerRuntime() throws Exception {
+  void shippedArchiveContainsTheProxyAndItsLibraries() throws Exception {
     Path archivePath = Path.of(requireProperty(ARCHIVE_PROPERTY));
     assertTrue(Files.isRegularFile(archivePath));
 
@@ -41,30 +40,12 @@ class ProxyArchiveIT {
       require(entries, "libs/jsch-2.28.4.jar");
       require(entries, "libs/sigstore-java-2.2.0.jar");
       require(entries, "libs/protobuf-java-4.33.4.jar");
-      require(entries, "document-worker/src/confer_document_worker/main.py");
-      require(entries, "document-worker/runtime/docling/backend/msword_backend.py");
 
       assertFalse(entries.keySet().stream().anyMatch(name -> name.startsWith("native/")));
-      assertDocumentWorkerLibrariesAreLinux(archive, entries);
+      assertFalse(entries.keySet().stream().anyMatch(name -> name.startsWith("document-worker/")));
 
       verifyProxyJar(bytes(archive, entries.get("proxy.jar")));
     }
-  }
-
-  private static void assertDocumentWorkerLibrariesAreLinux(
-      ZipFile              archive,
-      Map<String, ZipEntry> entries)
-      throws IOException
-  {
-    int libraries = 0;
-    for (Map.Entry<String, ZipEntry> entry : entries.entrySet()) {
-      if (entry.getKey().startsWith("document-worker/runtime/")
-          && entry.getKey().endsWith(".so")) {
-        assertElf(archive, entry.getValue());
-        libraries++;
-      }
-    }
-    assertTrue(libraries > 0, "Proxy archive has no document worker libraries");
   }
 
   private static Map<String, ZipEntry> entries(ZipFile archive) {
@@ -107,17 +88,6 @@ class ProxyArchiveIT {
         "META-INF/sigstore-production-trusted-root.json"));
     assertTrue(entries.contains(
         "META-INF/sigstore-staging-trusted-root.json"));
-  }
-
-  private static void assertElf(ZipFile archive,
-                                ZipEntry entry)
-      throws IOException
-  {
-    byte[] header;
-    try (InputStream input = archive.getInputStream(entry)) {
-      header = input.readNBytes(4);
-    }
-    assertArrayEquals(new byte[] {0x7f, 'E', 'L', 'F'}, header);
   }
 
   private static byte[] bytes(ZipFile archive,

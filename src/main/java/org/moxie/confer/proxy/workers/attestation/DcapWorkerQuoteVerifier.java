@@ -41,6 +41,7 @@ public class DcapWorkerQuoteVerifier implements WorkerQuoteVerifier {
   @Override
   public void verify(byte[] quote,
                      byte[] expectedReportData,
+                     byte[] expectedRtmr3,
                      String manifest,
                      String manifestBundle)
       throws WorkerException
@@ -57,6 +58,10 @@ public class DcapWorkerQuoteVerifier implements WorkerQuoteVerifier {
 
     if (!MessageDigest.isEqual(expectedReportData, decodeReportData(claims.reportData()))) {
       throw new WorkerException("Worker REPORTDATA does not match");
+    }
+
+    if (!MessageDigest.isEqual(expectedRtmr3, HexFormat.of().parseHex(claims.rtmr3()))) {
+      throw new WorkerException("Worker RTMR3 records more than this reservation");
     }
 
     releases.verify(manifest, manifestBundle, claims);

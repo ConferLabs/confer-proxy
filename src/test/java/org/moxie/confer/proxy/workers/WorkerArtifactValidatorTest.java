@@ -60,7 +60,8 @@ class WorkerArtifactValidatorTest {
     publisher.publish(
         "generated-attachments",
         "combined-sales.xlsx",
-        new ByteArrayInputStream(content));
+        new ByteArrayInputStream(content),
+        null);
     return publisher;
   }
 

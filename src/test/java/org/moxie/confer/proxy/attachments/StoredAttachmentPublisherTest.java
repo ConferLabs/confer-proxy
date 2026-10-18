@@ -9,6 +9,7 @@ import org.moxie.confer.proxy.documents.DocumentDescriptor;
 import org.moxie.confer.proxy.documents.DocumentObjectKeys;
 import org.moxie.confer.proxy.documents.DocumentStorageWriter;
 import org.moxie.confer.proxy.documents.extraction.StoredDocumentExtractor;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
 import org.moxie.confer.proxy.documents.responses.DocumentExtractionResult;
 
 import java.io.ByteArrayInputStream;
@@ -24,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -35,6 +37,9 @@ class StoredAttachmentPublisherTest {
 
   @Mock
   private StoredDocumentExtractor extractor;
+
+  @Mock
+  private DocumentWorkerScheduler workers;
 
   private RecordingStorage          storage;
   private StoredAttachmentPublisher publisher;
@@ -52,7 +57,8 @@ class StoredAttachmentPublisherTest {
         any(DocumentDescriptor.class),
         any(DocumentObjectKeys.class),
         anyString(),
-        anyInt())).thenAnswer(invocation -> {
+        anyInt(),
+        same(workers))).thenAnswer(invocation -> {
           assertTrue(storage.stored);
           return new DocumentExtractionResult(123, null);
         });
@@ -60,7 +66,8 @@ class StoredAttachmentPublisherTest {
     AttachmentReference reference = publisher.publish(
         ATTACHMENT_PREFIX,
         "report.pdf",
-        new ByteArrayInputStream(content));
+        new ByteArrayInputStream(content),
+        workers);
 
     assertEquals(ATTACHMENT_PREFIX + "/" + reference.id(), storage.objectKey);
     assertEquals(reference.sourceObjectKey(), storage.objectKey);
@@ -78,7 +85,8 @@ class StoredAttachmentPublisherTest {
                 && document.totalLength() == reference.size()),
         argThat(objectKeys -> objectKeys.source().equals(reference.sourceObjectKey())),
         eq(reference.encryptionKey()),
-        eq(0));
+        eq(0),
+        same(workers));
   }
 
   @Test
@@ -86,7 +94,8 @@ class StoredAttachmentPublisherTest {
     AttachmentReference reference = publisher.publish(
         ATTACHMENT_PREFIX,
         "empty.bin",
-        new ByteArrayInputStream(new byte[0]));
+        new ByteArrayInputStream(new byte[0]),
+        workers);
 
     assertArrayEquals(new byte[0], storage.content);
     assertEquals("application/octet-stream", reference.contentType());
@@ -99,11 +108,13 @@ class StoredAttachmentPublisherTest {
     AttachmentReference heic = publisher.publish(
         ATTACHMENT_PREFIX,
         "photo.HEIC",
-        new ByteArrayInputStream(new byte[] {1}));
+        new ByteArrayInputStream(new byte[] {1}),
+        workers);
     AttachmentReference heif = publisher.publish(
         ATTACHMENT_PREFIX,
         "photo.heif",
-        new ByteArrayInputStream(new byte[] {1}));
+        new ByteArrayInputStream(new byte[] {1}),
+        workers);
 
     assertEquals("image/heic", heic.contentType());
     assertEquals("image/heif", heif.contentType());
@@ -116,12 +127,14 @@ class StoredAttachmentPublisherTest {
         any(DocumentDescriptor.class),
         any(DocumentObjectKeys.class),
         anyString(),
-        anyInt())).thenReturn(new DocumentExtractionResult(0, null));
+        anyInt(),
+        same(workers))).thenReturn(new DocumentExtractionResult(0, null));
 
     AttachmentReference reference = publisher.publish(
         ATTACHMENT_PREFIX,
         "blank.pdf",
-        new ByteArrayInputStream(new byte[] {1}));
+        new ByteArrayInputStream(new byte[] {1}),
+        workers);
 
     assertEquals(Long.valueOf(0), reference.extractedTextLength());
   }
@@ -132,12 +145,14 @@ class StoredAttachmentPublisherTest {
         any(DocumentDescriptor.class),
         any(DocumentObjectKeys.class),
         anyString(),
-        anyInt())).thenThrow(new IOException("extraction failed"));
+        anyInt(),
+        same(workers))).thenThrow(new IOException("extraction failed"));
 
     AttachmentReference reference = publisher.publish(
         ATTACHMENT_PREFIX,
         "report.docx",
-        new ByteArrayInputStream(new byte[] {1}));
+        new ByteArrayInputStream(new byte[] {1}),
+        workers);
 
     assertNull(reference.extractedTextLength());
     assertTrue(storage.stored);

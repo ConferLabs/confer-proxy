@@ -124,6 +124,7 @@ class DcapWorkerQuoteVerifierIntegrationTest {
     verifier.verify(
         quote,
         HexFormat.of().parseHex(claims.reportData()),
+        HexFormat.of().parseHex(claims.rtmr3()),
         "{}",
         "{}");
   }

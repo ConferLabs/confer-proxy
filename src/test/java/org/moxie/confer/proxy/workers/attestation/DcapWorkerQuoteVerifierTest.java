@@ -12,16 +12,19 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.moxie.confer.proxy.workers.WorkerException;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class DcapWorkerQuoteVerifierTest {
 
   private static final String MANIFEST = "{\"version\":1}";
   private static final String MANIFEST_BUNDLE = "{\"bundle\":true}";
+  private static final String RTMR3 = "e".repeat(96);
 
   private byte[]                         reportData;
   private SigstoreWorkerReleaseVerifier releases;
@@ -110,8 +113,22 @@ class DcapWorkerQuoteVerifierTest {
         () -> verifier.verify(
             new byte[636],
             new byte[64],
+            new byte[48],
             MANIFEST,
             MANIFEST_BUNDLE));
+  }
+
+  @Test
+  void rejectsAnRtmr3ThatRecordsMoreThanThisReservation() {
+    DcapWorkerQuoteVerifier verifier = verifier(claims(false, false, reportData));
+    byte[] otherRtmr3 = HexFormat.of().parseHex("f".repeat(96));
+
+    WorkerException error = assertThrows(
+        WorkerException.class,
+        () -> verifier.verify(new byte[] {1}, reportData, otherRtmr3, MANIFEST, MANIFEST_BUNDLE));
+
+    assertEquals("Worker RTMR3 records more than this reservation", error.getMessage());
+    verifyNoInteractions(releases);
   }
 
   @Test
@@ -193,6 +210,7 @@ class DcapWorkerQuoteVerifierTest {
     verifier.verify(
         new byte[] {1},
         reportData,
+        HexFormat.of().parseHex(RTMR3),
         MANIFEST,
         MANIFEST_BUNDLE);
   }
@@ -201,9 +219,11 @@ class DcapWorkerQuoteVerifierTest {
       throws WorkerException
   {
     byte[] quote = TdxQuoteTest.quote();
+    WorkerTdxClaims claims = TdxQuote.parse(quote).getClaims();
     verifier.verify(
         quote,
-        HexFormat.of().parseHex(TdxQuote.parse(quote).getClaims().reportData()),
+        HexFormat.of().parseHex(claims.reportData()),
+        HexFormat.of().parseHex(claims.rtmr3()),
         MANIFEST,
         MANIFEST_BUNDLE);
   }
@@ -232,6 +252,7 @@ class DcapWorkerQuoteVerifierTest {
         hex('b'),
         hex('c'),
         hex('d'),
+        RTMR3,
         reportData,
         false,
         false);
@@ -246,6 +267,7 @@ class DcapWorkerQuoteVerifierTest {
         hex('b'),
         hex('c'),
         hex('d'),
+        RTMR3,
         HexFormat.of().formatHex(reportData),
         debuggable,
         migratable);

@@ -22,11 +22,14 @@ import org.moxie.confer.proxy.workers.WorkerWorkspace;
 import org.moxie.confer.proxy.workers.WorkerClient;
 
 import jakarta.websocket.CloseReason;
+import jakarta.websocket.OnClose;
+import jakarta.websocket.OnError;
 import jakarta.ws.rs.WebApplicationException;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -165,10 +168,8 @@ class WebsocketControllerTest {
   }
 
   @Test
-  void initializeRoutesKeepsLegacyAndStoredExtractionSeparate() {
-    LegacyDocumentExtractionHandler legacy = mock(LegacyDocumentExtractionHandler.class);
+  void initializeRoutesServesOnlyStoredExtraction() {
     DocumentExtractionHandler stored = mock(DocumentExtractionHandler.class);
-    controller.legacyDocumentExtractionHandler = legacy;
     controller.documentExtractionHandler = stored;
     controller.vllmWebsocketHandler = mock(OpenAIWebsocketHandler.class);
     controller.pingWebsocketHandler = mock(PingWebsocketHandler.class);
@@ -177,8 +178,7 @@ class WebsocketControllerTest {
 
     controller.testInitializeRoutes();
 
-    assertSame(
-        legacy,
+    assertNull(
         controller.handlerFor(new Route(
             "POST",
             "/v1/document/extract")));
@@ -556,6 +556,17 @@ class WebsocketControllerTest {
     assertTrue(resourceClosed.await(5, TimeUnit.SECONDS), "Disconnected streaming resource should close");
     verify(basicRemote, after(300).times(1)).sendBinary(any(ByteBuffer.class));
     verify(session, never()).close(any(CloseReason.class));
+  }
+
+  @Test
+  void lifecycleOverridesAreVisibleToTheWebsocketRuntime() throws Exception {
+    Method onClose = WebsocketController.class.getMethod("onClose", Session.class, CloseReason.class);
+    Method onError = WebsocketController.class.getMethod("onError", Session.class, Throwable.class);
+
+    assertEquals(WebsocketController.class, onClose.getDeclaringClass());
+    assertTrue(onClose.isAnnotationPresent(OnClose.class));
+    assertEquals(WebsocketController.class, onError.getDeclaringClass());
+    assertTrue(onError.isAnnotationPresent(OnError.class));
   }
 
   @Test

@@ -23,6 +23,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URI;
@@ -38,6 +39,7 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -68,6 +70,8 @@ class WorkerConnectionIntegrationTest {
   private static final byte[] QUOTE = "authenticated-quote".getBytes(StandardCharsets.US_ASCII);
   private static final Duration TEST_TIMEOUT = Duration.ofSeconds(15);
   private static final Path WORKSPACE = Path.of("var/lib/confer/workspace");
+  private static final String FIXED_COMMAND =
+      "cd '/var/lib/confer/workspace' && exec /bin/bash --noprofile --norc -s";
 
   @Test
   void allocatesAttestsAuthenticatesAndExecutesOverOneConnection(
@@ -85,7 +89,7 @@ class WorkerConnectionIntegrationTest {
           serverRoot);
       AtomicReference<byte[]> verifiedReportData = new AtomicReference<>();
       AtomicBoolean quoteVerified = new AtomicBoolean();
-      WorkerQuoteVerifier verifier = (quote, reportData, manifest, bundle) -> {
+      WorkerQuoteVerifier verifier = (quote, reportData, rtmr3, manifest, bundle) -> {
         assertArrayEquals(QUOTE, quote);
         assertEquals(MANIFEST, manifest);
         assertEquals(MANIFEST_BUNDLE, bundle);
@@ -136,7 +140,7 @@ class WorkerConnectionIntegrationTest {
           authenticatedClientKey,
           new AtomicReference<>(),
           serverRoot);
-      WorkerQuoteVerifier verifier = (quote, reportData, manifest, bundle) -> {
+      WorkerQuoteVerifier verifier = (quote, reportData, rtmr3, manifest, bundle) -> {
         throw new WorkerException("Untrusted worker");
       };
       WorkerConnection connection = new WorkerConnection(
@@ -167,7 +171,7 @@ class WorkerConnectionIntegrationTest {
           serverRoot);
       WorkerConnection connection = new WorkerConnection(
           mapper,
-          new WorkerAttestationHandshake(mapper, (quote, reportData, manifest, bundle) -> {}));
+          new WorkerAttestationHandshake(mapper, (quote, reportData, rtmr3, manifest, bundle) -> {}));
       byte[] content = new byte[192 * 1024];
       for (int index = 0; index < content.length; index++) {
         content[index] = (byte) (index * 31);
@@ -216,7 +220,7 @@ class WorkerConnectionIntegrationTest {
           serverRoot);
       WorkerConnection connection = new WorkerConnection(
           mapper,
-          new WorkerAttestationHandshake(mapper, (quote, reportData, manifest, bundle) -> {}));
+          new WorkerAttestationHandshake(mapper, (quote, reportData, rtmr3, manifest, bundle) -> {}));
 
       try (Relay relay = new Relay(mapper, server, hostKey.getPublic(), true)) {
         connection.connect(relay.getContainer(), CONTROLLER_URI, TOKEN);
@@ -252,7 +256,7 @@ class WorkerConnectionIntegrationTest {
         mapper,
         new WorkerAttestationHandshake(
             mapper,
-            (quote, reportData, manifest, bundle) -> {}));
+            (quote, reportData, rtmr3, manifest, bundle) -> {}));
     AtomicReference<Throwable> failure = new AtomicReference<>();
 
     try (Relay relay = new Relay(mapper, server, hostKey.getPublic())) {
@@ -294,7 +298,7 @@ class WorkerConnectionIntegrationTest {
         mapper,
         new WorkerAttestationHandshake(
             mapper,
-            (quote, reportData, manifest, bundle) -> {}));
+            (quote, reportData, rtmr3, manifest, bundle) -> {}));
     AtomicReference<Throwable> failure = new AtomicReference<>();
 
     try (Relay relay = new Relay(
@@ -324,6 +328,121 @@ class WorkerConnectionIntegrationTest {
       connection.close();
       server.stop(true);
     }
+  }
+
+  @Test
+  void streamsAProcessInBothDirectionsAndReleasesTheChannel(@TempDir Path serverRoot) {
+    assertTimeout(TEST_TIMEOUT, () -> {
+      ObjectMapper mapper = new ObjectMapper();
+      KeyPair hostKey = generateEd25519Key();
+      AtomicReference<String> requestedCommand = new AtomicReference<>();
+      SshServer server = startProcessServer(hostKey, requestedCommand, serverRoot);
+      WorkerConnection connection = new WorkerConnection(
+          mapper,
+          new WorkerAttestationHandshake(
+              mapper,
+              (quote, reportData, rtmr3, manifest, bundle) -> {}));
+      byte[] payload = new byte[3 * 1024 * 1024 + 17];
+      new Random(7).nextBytes(payload);
+      AtomicReference<Throwable> writeFailure = new AtomicReference<>();
+
+      try (Relay relay = new Relay(mapper, server, hostKey.getPublic())) {
+        connection.connect(relay.getContainer(), CONTROLLER_URI, TOKEN);
+
+        byte[] echoed;
+        // The test server pumps stdin and stdout on one thread, so the process
+        // must consume its input before writing output.
+        try (WorkerProcess process = connection.startProcess(
+            "file=$(mktemp) && cat > \"$file\" && cat \"$file\" && rm \"$file\""))
+        {
+          Thread writing = Thread.ofVirtual().start(() -> {
+            try (OutputStream input = process.getOutputStream()) {
+              input.write(payload);
+            } catch (Throwable error) {
+              writeFailure.set(error);
+            }
+          });
+          echoed = process.getInputStream().readAllBytes();
+          writing.join();
+        }
+
+        assertNull(writeFailure.get());
+        assertArrayEquals(payload, echoed);
+        assertEquals(
+            "file=$(mktemp) && cat > \"$file\" && cat \"$file\" && rm \"$file\"",
+            requestedCommand.get());
+
+        WorkerCommandResult after = connection.execute("printf 'still-open\\n'\n");
+        assertEquals(0, after.exitCode());
+        assertEquals("still-open\n", after.output());
+      } finally {
+        connection.close();
+        server.stop(true);
+      }
+    });
+  }
+
+  @Test
+  void closingTheConnectionEndsAProcessReader(@TempDir Path serverRoot) {
+    assertTimeout(TEST_TIMEOUT, () -> {
+      ObjectMapper mapper = new ObjectMapper();
+      KeyPair hostKey = generateEd25519Key();
+      SshServer server = startProcessServer(hostKey, new AtomicReference<>(), serverRoot);
+      WorkerConnection connection = new WorkerConnection(
+          mapper,
+          new WorkerAttestationHandshake(
+              mapper,
+              (quote, reportData, rtmr3, manifest, bundle) -> {}));
+      AtomicReference<Integer> readResult = new AtomicReference<>();
+
+      try (Relay relay = new Relay(mapper, server, hostKey.getPublic())) {
+        connection.connect(relay.getContainer(), CONTROLLER_URI, TOKEN);
+
+        try (WorkerProcess process = connection.startProcess("exec sleep 60")) {
+          Thread reading = Thread.ofVirtual().start(() -> {
+            try {
+              readResult.set(process.getInputStream().read());
+            } catch (IOException error) {
+              readResult.set(-2);
+            }
+          });
+
+          connection.close();
+          reading.join(TimeUnit.SECONDS.toMillis(2));
+
+          assertFalse(reading.isAlive());
+          assertNotNull(readResult.get());
+        }
+
+        assertThrows(WorkerException.class, () -> connection.startProcess("exec cat"));
+      } finally {
+        connection.close();
+        server.stop(true);
+      }
+    });
+  }
+
+  private static SshServer startProcessServer(KeyPair                 hostKey,
+                                              AtomicReference<String> requestedCommand,
+                                              Path                    serverRoot)
+      throws IOException
+  {
+    SshServer server = startServer(
+        hostKey,
+        new AtomicReference<>(),
+        requestedCommand,
+        serverRoot);
+    server.setCommandFactory((channel, command) -> {
+      if (command.equals(FIXED_COMMAND)) {
+        return new ProcessShellFactory(
+            "/bin/bash --noprofile --norc -s",
+            List.of("/bin/bash", "--noprofile", "--norc", "-s")).createShell(channel);
+      }
+      requestedCommand.set(command);
+      return new ProcessShellFactory(command, List.of("/bin/bash", "-c", command))
+          .createShell(channel);
+    });
+    return server;
   }
 
   private static SshServer startServer(

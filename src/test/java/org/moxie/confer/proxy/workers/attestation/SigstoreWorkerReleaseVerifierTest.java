@@ -364,6 +364,7 @@ class SigstoreWorkerReleaseVerifierTest {
         rtmr0,
         rtmr1,
         rtmr2,
+        "0".repeat(96),
         "00".repeat(64),
         false,
         false);

@@ -15,12 +15,14 @@ import org.moxie.confer.proxy.documents.extraction.StoredDocumentExtractor;
 import org.moxie.confer.proxy.documents.requests.DocumentExtractionRequest;
 import org.moxie.confer.proxy.documents.responses.DocumentExtractionResult;
 import org.moxie.confer.proxy.documents.worker.DocumentExtractionRejectedException;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
 import org.moxie.confer.proxy.documents.worker.DocumentWorkerTimeoutException;
 import org.moxie.confer.proxy.entities.WebsocketRequest;
 import org.moxie.confer.proxy.storage.InvalidObjectStorageKeyException;
 import org.moxie.confer.proxy.websocket.WebsocketConnectionContext;
 import org.moxie.confer.proxy.websocket.WebsocketHandler;
 import org.moxie.confer.proxy.websocket.WebsocketHandlerResponse;
+import org.moxie.confer.proxy.workers.WorkerClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -44,6 +46,9 @@ public class DocumentExtractionHandler implements WebsocketHandler {
   @Inject
   StoredDocumentExtractor extractor;
 
+  @Inject
+  WorkerClient workerClient;
+
   @Override
   public WebsocketHandlerResponse handle(WebsocketConnectionContext context,
                                          WebsocketRequest           request)
@@ -57,7 +62,8 @@ public class DocumentExtractionHandler implements WebsocketHandler {
     DocumentDescriptor        document                = documentDescriptor(options);
     DocumentObjectKeys        objectKeys              = objectKeys(options);
 
-    DocumentExtractionResult result = extract(options, document, objectKeys, inlineTextMaxCharacters);
+    DocumentWorkerScheduler  workers = context.getWorkerWorkspace(workerClient).getDocumentWorkers();
+    DocumentExtractionResult result  = extract(options, document, objectKeys, inlineTextMaxCharacters, workers);
     byte[]                   body   = serialize(result);
 
     return new WebsocketHandlerResponse.StreamingResponse(
@@ -77,12 +83,13 @@ public class DocumentExtractionHandler implements WebsocketHandler {
   }
 
   private DocumentExtractionResult extract(DocumentExtractionRequest options,
-                                           DocumentDescriptor document,
-                                           DocumentObjectKeys objectKeys,
-                                           int inlineTextMaxCharacters)
+                                           DocumentDescriptor        document,
+                                           DocumentObjectKeys        objectKeys,
+                                           int                       inlineTextMaxCharacters,
+                                           DocumentWorkerScheduler   workers)
   {
     try {
-      return extractor.extract(document, objectKeys, options.encryptionKey(), inlineTextMaxCharacters);
+      return extractor.extract(document, objectKeys, options.encryptionKey(), inlineTextMaxCharacters, workers);
     } catch (DocumentWorkerTimeoutException error) {
       throw new WebApplicationException(error.getMessage(), 503);
     } catch (DocumentExtractionRejectedException error) {

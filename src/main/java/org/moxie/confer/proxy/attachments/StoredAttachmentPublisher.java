@@ -7,6 +7,7 @@ import org.moxie.confer.proxy.documents.DocumentObjectKeys;
 import org.moxie.confer.proxy.documents.DocumentStorageWriter;
 import org.moxie.confer.proxy.documents.UnsupportedDocumentTypeException;
 import org.moxie.confer.proxy.documents.extraction.StoredDocumentExtractor;
+import org.moxie.confer.proxy.documents.worker.DocumentWorkerScheduler;
 import org.moxie.confer.proxy.storage.InvalidObjectStorageKeyException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,9 +40,10 @@ public class StoredAttachmentPublisher implements AttachmentPublisher {
   }
 
   @Override
-  public AttachmentReference publish(String      attachmentPrefix,
-                                     String      filename,
-                                     InputStream content)
+  public AttachmentReference publish(String                  attachmentPrefix,
+                                     String                  filename,
+                                     InputStream             content,
+                                     DocumentWorkerScheduler documentWorkers)
       throws IOException
   {
     byte[] key = new byte[32];
@@ -57,7 +59,7 @@ public class StoredAttachmentPublisher implements AttachmentPublisher {
     String                       contentType = document.map(DocumentDescriptor::mediaType).orElseGet(() -> getContentType(filename));
 
     Long extractedTextLength = document.isPresent()
-        ? extract(document.orElseThrow(), objectKeys, encryptionKey)
+        ? extract(document.orElseThrow(), objectKeys, encryptionKey, documentWorkers)
         : null;
 
     return new AttachmentReference(
@@ -70,12 +72,13 @@ public class StoredAttachmentPublisher implements AttachmentPublisher {
         extractedTextLength);
   }
 
-  private Long extract(DocumentDescriptor document,
-                       DocumentObjectKeys objectKeys,
-                       String encryptionKey)
+  private Long extract(DocumentDescriptor      document,
+                       DocumentObjectKeys      objectKeys,
+                       String                  encryptionKey,
+                       DocumentWorkerScheduler documentWorkers)
   {
     try {
-      return extractor.extract(document, objectKeys, encryptionKey, 0).textLength();
+      return extractor.extract(document, objectKeys, encryptionKey, 0, documentWorkers).textLength();
     } catch (IOException error) {
       log.warn("Generated attachment extraction failed");
       return null;

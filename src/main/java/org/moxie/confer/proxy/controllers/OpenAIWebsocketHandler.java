@@ -163,8 +163,10 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
                                        OutputStream               output)
   {
     try {
-      DocumentToolSession documentSession = documentToolSessions.open(chatRequest.documents());
       WorkerWorkspace     workerWorkspace = context.getWorkerWorkspace(workerClient);
+      DocumentToolSession documentSession = documentToolSessions.open(
+          chatRequest.documents(),
+          workerWorkspace.getDocumentWorkers());
 
       List<ChatCompletionMessageParam> conversationHistory = new ArrayList<>();
       int                              maxIterations       = config.getMaxToolIterations();

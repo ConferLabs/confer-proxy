@@ -1,6 +1,7 @@
 package org.moxie.confer.proxy.workers;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jcraft.jsch.Channel;
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.JSchException;
@@ -77,6 +78,40 @@ class WorkerConnection extends WorkerWebsocketConnection {
     return executeCommand(encodedCommand);
   }
 
+  /**
+   * Starts {@code command} through the worker's shell. The command must be a
+   * constant: data for the process goes over its standard input, never into the
+   * command line.
+   */
+  public WorkerProcess startProcess(String command)
+      throws WorkerException
+  {
+    if (command == null || command.isBlank()) {
+      throw new WorkerException("Worker process command is required");
+    }
+
+    ChannelExec channel = openExecutionChannel();
+    boolean     started = false;
+
+    try {
+      channel.setCommand(command);
+      InputStream  output = channel.getInputStream();
+      OutputStream input  = channel.getOutputStream();
+      channel.connect(CHANNEL_CONNECT_TIMEOUT_MILLIS);
+
+      WorkerProcess process = new WorkerProcess(channel, output, input);
+      started = true;
+      return process;
+    } catch (JSchException | IOException error) {
+      closeIfDisconnected();
+      throw new WorkerException("Unable to start a worker process", error);
+    } finally {
+      if (!started) {
+        channel.disconnect();
+      }
+    }
+  }
+
   public OpenFile openFile(String path,
                            long   maximumBytes)
       throws WorkerException
@@ -146,7 +181,7 @@ class WorkerConnection extends WorkerWebsocketConnection {
 
       return new WorkerCommandResult(exitStatus, output.getOutput(), output.isTruncated());
     } catch (JSchException error) {
-      close();
+      closeIfDisconnected();
       throw new WorkerException("Unable to run a worker command", error);
     } finally {
       channel.disconnect();
@@ -220,21 +255,12 @@ class WorkerConnection extends WorkerWebsocketConnection {
   }
 
   private ChannelExec openExecutionChannel() throws WorkerException {
-    Session connected = requireOpen("Worker connection is closed");
-
-    try {
-      return (ChannelExec) connected.openChannel("exec");
-    } catch (JSchException error) {
-      close();
-      throw new WorkerException("Unable to open a worker execution channel", error);
-    }
+    return (ChannelExec) openChannel("exec");
   }
 
   private ChannelSftp openSftpChannel() throws WorkerException {
-    Session connected = requireOpen("Worker connection is closed");
-
     try {
-      ChannelSftp sftp = (ChannelSftp) connected.openChannel("sftp");
+      ChannelSftp sftp = (ChannelSftp) openChannel("sftp");
 
       try {
         sftp.connect(CHANNEL_CONNECT_TIMEOUT_MILLIS);
@@ -244,10 +270,30 @@ class WorkerConnection extends WorkerWebsocketConnection {
         throw error;
       }
     } catch (JSchException error) {
-      close();
+      closeIfDisconnected();
       throw new WorkerException(
           "Unable to open a worker file transfer",
           error);
+    }
+  }
+
+  /**
+   * Opens a channel on the session. JSch reports a session that went down
+   * while opening the channel by returning null rather than throwing.
+   */
+  private Channel openChannel(String type) throws WorkerException {
+    Session connected = requireOpen("Worker connection is closed");
+
+    try {
+      Channel channel = connected.openChannel(type);
+      if (channel == null) {
+        closeIfDisconnected();
+        throw new WorkerException("Worker connection is closed");
+      }
+      return channel;
+    } catch (JSchException error) {
+      closeIfDisconnected();
+      throw new WorkerException("Unable to open a worker channel", error);
     }
   }
 
@@ -323,6 +369,19 @@ class WorkerConnection extends WorkerWebsocketConnection {
       channel.rm(path);
     } catch (SftpException ignored) {
     }
+  }
+
+  /**
+   * A refused or failed channel leaves the attested connection usable, so it
+   * fails only its own operation. A lost SSH session ends the connection.
+   */
+  private void closeIfDisconnected() {
+    synchronized (this) {
+      if (session != null && session.isConnected()) {
+        return;
+      }
+    }
+    close();
   }
 
   private synchronized Session requireOpen(String message)

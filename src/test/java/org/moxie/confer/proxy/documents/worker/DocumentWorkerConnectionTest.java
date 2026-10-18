@@ -391,7 +391,8 @@ class DocumentWorkerConnectionTest {
             1,
             2,
             List.of(),
-            List.of(new DocumentContainerReference(1, "page", "12"))),
+            List.of(new DocumentContainerReference(1, "page", "12")),
+            false),
         Map.of(
             DocumentWorkerPayloadRole.TEXT,
             payload(

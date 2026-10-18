@@ -15,6 +15,8 @@ class WorkerAttestationHandshake {
 
   private static final byte[] REPORT_DOMAIN =
       "confer.worker.ssh.prelude.v4".getBytes(StandardCharsets.US_ASCII);
+  private static final byte[] RESERVATION_DOMAIN =
+      "confer.worker.rtmr3.reservation.v1".getBytes(StandardCharsets.US_ASCII);
   private static final byte[] SSH_ED25519 =
       "ssh-ed25519".getBytes(StandardCharsets.US_ASCII);
   private static final byte[] ED25519_KEY_PREFIX = getEd25519KeyPrefix();
@@ -23,6 +25,7 @@ class WorkerAttestationHandshake {
   private static final int ED25519_KEY_BLOB_BYTES        = 51;
   private static final int MAX_QUOTE_BYTES               = 64 * 1024;
   private static final int MAX_RELEASE_EVIDENCE_BYTES    = 32 * 1024;
+  private static final int MEASUREMENT_BYTES             = 48;
 
   private final ObjectMapper        objectMapper;
   private final WorkerQuoteVerifier verifier;
@@ -86,7 +89,12 @@ class WorkerAttestationHandshake {
     String manifest       = requireReleaseEvidence(response.manifest());
     String manifestBundle = requireReleaseEvidence(response.manifestBundle());
 
-    verifier.verify(quote, getExpectedReportData(hostKey, clientKey, challenge), manifest, manifestBundle);
+    verifier.verify(
+        quote,
+        getExpectedReportData(hostKey, clientKey, challenge),
+        getExpectedRtmr3(hostKey, clientKey, challenge),
+        manifest,
+        manifestBundle);
 
     return hostKey;
   }
@@ -104,6 +112,31 @@ class WorkerAttestationHandshake {
       return digest.digest();
     } catch (NoSuchAlgorithmException error) {
       throw new IllegalStateException("SHA-512 is unavailable", error);
+    }
+  }
+
+  /**
+   * RTMR3 is zero at boot. The worker extends it once with this reservation
+   * before quoting, so any earlier reservation or other extension yields a
+   * different value: a match proves this client is the first to connect.
+   */
+  static byte[] getExpectedRtmr3(byte[] hostKey,
+                                 byte[] clientKey,
+                                 byte[] challenge)
+  {
+    try {
+      MessageDigest reservation = MessageDigest.getInstance("SHA-384");
+      reservation.update(RESERVATION_DOMAIN);
+      reservation.update(hostKey);
+      reservation.update(clientKey);
+      reservation.update(challenge);
+
+      MessageDigest register = MessageDigest.getInstance("SHA-384");
+      register.update(new byte[MEASUREMENT_BYTES]);
+      register.update(reservation.digest());
+      return register.digest();
+    } catch (NoSuchAlgorithmException error) {
+      throw new IllegalStateException("SHA-384 is unavailable", error);
     }
   }
 

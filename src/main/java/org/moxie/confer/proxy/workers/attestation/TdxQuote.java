@@ -16,6 +16,7 @@ class TdxQuote {
   private static final int RTMR0_OFFSET = 376;
   private static final int RTMR1_OFFSET = 424;
   private static final int RTMR2_OFFSET = 472;
+  private static final int RTMR3_OFFSET = 520;
   private static final int REPORT_DATA_OFFSET = 568;
   private static final int SIGNATURE_LENGTH_OFFSET = 632;
   private static final int SIGNATURE_OFFSET = 636;
@@ -62,6 +63,7 @@ class TdxQuote {
         hex(RTMR0_OFFSET, MEASUREMENT_BYTES),
         hex(RTMR1_OFFSET, MEASUREMENT_BYTES),
         hex(RTMR2_OFFSET, MEASUREMENT_BYTES),
+        hex(RTMR3_OFFSET, MEASUREMENT_BYTES),
         hex(REPORT_DATA_OFFSET, REPORT_DATA_BYTES),
         (attributes & DEBUG_ATTRIBUTE) != 0,
         (attributes & MIGRATABLE_ATTRIBUTE) != 0);
