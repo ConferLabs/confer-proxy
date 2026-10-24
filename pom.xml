@@ -16,8 +16,10 @@
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.build.outputTimestamp>1990-01-01T00:00:00Z</project.build.outputTimestamp>
-        <helidon.version>4.2.6</helidon.version>
+        <helidon.version>4.5.6</helidon.version>
+        <protobuf.version>4.36.2</protobuf.version>
         <mockito.version>5.18.0</mockito.version>
+        <aws.sdk.version>2.57.3</aws.sdk.version>
         <mainClass>org.moxie.confer.proxy.Server</mainClass>
         <module.contentSha>unknown</module.contentSha>
         <s3.bucket>${env.S3_BUCKET}</s3.bucket>
@@ -26,9 +28,16 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>com.fasterxml.jackson</groupId>
-                <artifactId>jackson-bom</artifactId>
-                <version>2.18.2</version>
+                <groupId>io.grpc</groupId>
+                <artifactId>grpc-bom</artifactId>
+                <version>1.85.1</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-bom</artifactId>
+                <version>${protobuf.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
@@ -81,7 +90,7 @@
         <dependency>
             <groupId>dev.sigstore</groupId>
             <artifactId>sigstore-java</artifactId>
-            <version>2.2.0</version>
+            <version>2.4.0</version>
         </dependency>
 
         <dependency>
@@ -112,21 +121,28 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
-            <version>2.31.21</version>
+            <version>${aws.sdk.version}</version>
+        </dependency>
+
+        <!-- Declared directly so Maven resolves the HttpClient 5 release this needs over the
+             older one sigstore-java and openai-java bring in. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache5-client</artifactId>
+            <version>${aws.sdk.version}</version>
         </dependency>
 
         <!-- Protobuf -->
         <dependency>
             <groupId>com.google.protobuf</groupId>
             <artifactId>protobuf-java</artifactId>
-            <version>4.33.4</version>
         </dependency>
 
         <!-- Logging -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
-            <version>1.5.12</version>
+            <version>1.5.34</version>
         </dependency>
         <dependency>
             <groupId>com.logtail</groupId>
@@ -252,7 +268,7 @@
                 <artifactId>protobuf-maven-plugin</artifactId>
                 <version>0.6.1</version>
                 <configuration>
-                    <protocArtifact>com.google.protobuf:protoc:4.29.2:exe:${os.detected.classifier}</protocArtifact>
+                    <protocArtifact>com.google.protobuf:protoc:${protobuf.version}:exe:${os.detected.classifier}</protocArtifact>
                     <protoSourceRoot>${project.basedir}/proto</protoSourceRoot>
                 </configuration>
                 <executions>

@@ -1,6 +1,8 @@
 package org.moxie.confer.proxy.entities;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
@@ -34,6 +36,12 @@ public record ChatRequest(
   @Size(max = 1_000) @Valid List<@NotNull DocumentReference> documents,
   @Pattern(regexp = "auto|none") String toolChoice
 ) {
+  // vLLM fetches and decodes every referenced image before applying its own limits,
+  // so the total per request is bounded here. Clients resend the images in their
+  // visible history on every turn; this sits well above what fits in the context
+  // window before compaction.
+  static final int MAX_IMAGE_REFS = 256;
+
   public ChatRequest(
       List<Message> messages,
       String model,
@@ -106,6 +114,24 @@ public record ChatRequest(
         webSearch,
         clientTools,
         null);
+  }
+
+  @JsonIgnore
+  @AssertTrue
+  public boolean isImageRefCountWithinLimit() {
+    if (messages == null) {
+      return true;
+    }
+
+    int imageRefCount = 0;
+
+    for (Message message : messages) {
+      if (message != null && message.imageRefs() != null) {
+        imageRefCount += message.imageRefs().size();
+      }
+    }
+
+    return imageRefCount <= MAX_IMAGE_REFS;
   }
 
   public enum Role {

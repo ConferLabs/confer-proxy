@@ -7,7 +7,11 @@ import jakarta.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.moxie.confer.proxy.images.ImageReference;
 
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -132,6 +136,26 @@ class ChatRequestTest {
             "documents[0].sourceObjectKey",
             "documents[0].encryptionKey"),
         propertyPaths(validator.validate(request)));
+  }
+
+  @Test
+  void imageRefsAcrossMessagesAreCappedPerRequest() throws Exception {
+    ImageReference reference = new ImageReference(
+        "temporary-images/image",
+        Base64.getEncoder().encodeToString(new byte[32]),
+        "image/png");
+    List<ChatRequest.Message> atLimit = List.of(
+        new ChatRequest.Message(ChatRequest.Role.user, "first", Collections.nCopies(ChatRequest.MAX_IMAGE_REFS / 2, reference)),
+        new ChatRequest.Message(ChatRequest.Role.user, "second", Collections.nCopies(ChatRequest.MAX_IMAGE_REFS / 2, reference)));
+    List<ChatRequest.Message> overLimit = new ArrayList<>(atLimit);
+    overLimit.add(new ChatRequest.Message(ChatRequest.Role.user, "third", List.of(reference)));
+
+    assertTrue(validator.validate(requestWith(atLimit)).isEmpty());
+    assertEquals(Set.of("imageRefCountWithinLimit"), propertyPaths(validator.validate(requestWith(overLimit))));
+  }
+
+  private ChatRequest requestWith(List<ChatRequest.Message> messages) {
+    return new ChatRequest(messages, "model", null, null, null, null, null, null, null, null, true, null, null, null, null);
   }
 
   private Set<String> propertyPaths(Set<ConstraintViolation<ChatRequest>> violations) {

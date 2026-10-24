@@ -124,7 +124,8 @@ public class SigstoreWorkerReleaseVerifier {
       try {
         Bundle bundle = Bundle.from(new StringReader(bundleJson));
         verifier.verify(sha256(artifact), bundle, options);
-      } catch (BundleParseException | KeylessVerificationException error) {
+      } catch (BundleParseException | KeylessVerificationException | IllegalStateException error) {
+        // Sigstore also rejects structurally invalid bundles with IllegalStateException.
         throw new WorkerException("Worker release signature is invalid", error);
       }
     };

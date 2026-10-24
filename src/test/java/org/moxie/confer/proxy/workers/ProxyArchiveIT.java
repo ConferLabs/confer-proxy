@@ -38,8 +38,8 @@ class ProxyArchiveIT {
 
       require(entries, "proxy.jar");
       require(entries, "libs/jsch-2.28.4.jar");
-      require(entries, "libs/sigstore-java-2.2.0.jar");
-      require(entries, "libs/protobuf-java-4.33.4.jar");
+      require(entries, "libs/sigstore-java-2.4.0.jar");
+      require(entries, "libs/protobuf-java-4.36.2.jar");
 
       assertFalse(entries.keySet().stream().anyMatch(name -> name.startsWith("native/")));
       assertFalse(entries.keySet().stream().anyMatch(name -> name.startsWith("document-worker/")));

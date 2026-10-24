@@ -32,6 +32,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class ImageControllerTest {
 
+  private static final byte[] JPEG_SIGNATURE = new byte[] { (byte) 0xff, (byte) 0xd8, (byte) 0xff };
+
   @Mock
   private S3Client s3;
 
@@ -121,7 +123,7 @@ class ImageControllerTest {
 
   @Test
   void decryptsAndStreamsS3Object() throws Exception {
-    byte[] plaintext = "Hello, this is a test image!".getBytes();
+    byte[] plaintext = withJpegSignature("Hello, this is a test image!".getBytes());
     byte[] encrypted = encrypt(plaintext);
     String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
 
@@ -138,6 +140,27 @@ class ImageControllerTest {
     stream.write(out);
 
     assertArrayEquals(plaintext, out.toByteArray());
+  }
+
+  @Test
+  void rejectsUnsupportedImageFormatBeforeStreaming() throws Exception {
+    byte[] plaintext = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\n".getBytes();
+    byte[] encrypted = encrypt(plaintext);
+    String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
+
+    when(config.getS3Bucket()).thenReturn("test-bucket");
+    when(s3.getObject(any(GetObjectRequest.class)))
+      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
+        AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
+
+    Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), "image/png");
+    StreamingOutput stream = (StreamingOutput) response.getEntity();
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+    WebApplicationException error = assertThrows(WebApplicationException.class, () -> stream.write(out));
+
+    assertEquals(415, error.getResponse().getStatus());
+    assertEquals(0, out.size());
   }
 
   @Test
@@ -174,6 +197,7 @@ class ImageControllerTest {
     int chunkSize = 64 * 1024;
     byte[] plaintext = new byte[chunkSize * 2];
     java.util.Arrays.fill(plaintext, (byte) 'A');
+    System.arraycopy(JPEG_SIGNATURE, 0, plaintext, 0, JPEG_SIGNATURE.length);
 
     byte[] encrypted = encrypt(plaintext, chunkSize);
 
@@ -207,6 +231,7 @@ class ImageControllerTest {
     int chunkSize = 64;
     byte[] plaintext = new byte[chunkSize * 2];
     java.util.Arrays.fill(plaintext, (byte) 'B');
+    System.arraycopy(JPEG_SIGNATURE, 0, plaintext, 0, JPEG_SIGNATURE.length);
 
     byte[] encrypted = encrypt(plaintext, chunkSize);
 
@@ -261,6 +286,12 @@ class ImageControllerTest {
       testKey = gen.generateKey();
     }
     return testKey;
+  }
+
+  private static byte[] withJpegSignature(byte[] body) {
+    byte[] image = java.util.Arrays.copyOf(JPEG_SIGNATURE, JPEG_SIGNATURE.length + body.length);
+    System.arraycopy(body, 0, image, JPEG_SIGNATURE.length, body.length);
+    return image;
   }
 
   private static byte[] encrypt(byte[] plaintext) throws Exception {

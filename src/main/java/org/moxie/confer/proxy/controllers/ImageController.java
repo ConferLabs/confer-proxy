@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.StreamingOutput;
 import org.moxie.confer.proxy.config.Config;
 import org.moxie.confer.proxy.crypto.ChunkedCipherInputStream;
 import org.moxie.confer.proxy.crypto.ImageToken;
+import org.moxie.confer.proxy.images.ImageSignature;
 import org.moxie.confer.proxy.storage.InvalidObjectStorageKeyException;
 import org.moxie.confer.proxy.storage.ObjectStorageKey;
 import org.slf4j.Logger;
@@ -83,6 +84,13 @@ public class ImageController {
             encrypted,
             encryptionKey))
         {
+          byte[] header = plaintext.readNBytes(ImageSignature.HEADER_LENGTH);
+          if (!ImageSignature.isAllowed(header)) {
+            log.warn("Rejected image with an unsupported format");
+            throw new WebApplicationException("Unsupported image format", Response.Status.UNSUPPORTED_MEDIA_TYPE);
+          }
+
+          output.write(header);
           plaintext.transferTo(output);
           output.flush();
         }
