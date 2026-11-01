@@ -108,7 +108,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
     } else {
       return new WebsocketHandlerResponse.SingleResponse(
           200,
-          handleNonStreamingRequest(model, chatRequest));
+          handleNonStreamingRequest(model, chatRequest, context.getImagePool()));
     }
   }
 
@@ -134,9 +134,12 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
   // belong in the prompt: a follow-up on a streamed chat (its title, its memory
   // extraction) shares that chat's prompt prefix only if the template renders
   // the same tools. tool_choice "none" keeps the model from calling any.
-  private String handleNonStreamingRequest(ChatModel model, ChatRequest chatRequest) {
+  private String handleNonStreamingRequest(ChatModel   model,
+                                           ChatRequest chatRequest,
+                                           String      imagePool)
+  {
     RequestToolSet serverTools = toolRegistry.forRequest(toolEligibility(chatRequest));
-    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>(), true, serverTools);
+    ChatCompletionCreateParams params = buildCompletionParams(model, chatRequest, new ArrayList<>(), true, serverTools, imagePool);
     try {
       return client.chat().completions().create(params).choices().getFirst().message().content().orElse("");
     } catch (BadRequestException error) {
@@ -192,7 +195,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
           conversationHistory.add(ChatCompletionMessageParam.ofUser(wrapUpMessage));
         }
 
-        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration, serverTools);
+        ChatCompletionCreateParams params    = buildCompletionParams(model, chatRequest, conversationHistory, !isLastIteration, serverTools, context.getImagePool());
         ChunkProcessor             processor = new ChunkProcessor();
 
         try (StreamResponse<ChatCompletionChunk> response = client.chat().completions().createStreaming(params)) {
@@ -226,7 +229,8 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
               ToolResult             result       = executed.result();
               ToolResultPresentation presentation = messagePresenter.presentToolResult(
                   request.id(),
-                  result);
+                  result,
+                  context.getImagePool());
               conversationHistory.addAll(presentation.messages());
 
               sendToolResponseToClient(request.id(),
@@ -301,7 +305,8 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
                                                            ChatRequest chatRequest,
                                                            List<ChatCompletionMessageParam> additionalMessages,
                                                            boolean includeTools,
-                                                           RequestToolSet serverTools)
+                                                           RequestToolSet serverTools,
+                                                           String imagePool)
   {
     ChatCompletionCreateParams.Builder builder = ChatCompletionCreateParams.builder()
                                                                            .model(model);
@@ -361,7 +366,7 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
         case assistant -> builder.addAssistantMessage(message.content());
         case user      -> {
           if (hasImages(message)) {
-            builder.addMessage(ChatCompletionMessageParam.ofUser(messagePresenter.presentUserMessage(message.content(), message.imageRefs())));
+            builder.addMessage(ChatCompletionMessageParam.ofUser(messagePresenter.presentUserMessage(message.content(), message.imageRefs(), imagePool)));
           } else {
             builder.addUserMessage(message.content());
           }

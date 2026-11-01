@@ -21,7 +21,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class OpenAIMessagePresenterTest {
 
-  private static final String KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  private static final String KEY  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  private static final String POOL = "0123456789abcdef0123456789abcdef";
 
   @Mock
   private Config config;
@@ -37,7 +38,8 @@ class OpenAIMessagePresenterTest {
   void presentsTextResultAsOneCorrelatedToolMessage() {
     ToolResultPresentation presentation = presenter.presentToolResult(
         "call-1",
-        ToolResult.text("result"));
+        ToolResult.text("result"),
+        POOL);
 
     assertEquals(1, presentation.messages().size());
     assertTrue(presentation.imageReferences().isEmpty());
@@ -55,7 +57,7 @@ class OpenAIMessagePresenterTest {
         "client result",
         List.of(image));
 
-    ToolResultPresentation presentation = presenter.presentToolResult("call-1", result);
+    ToolResultPresentation presentation = presenter.presentToolResult("call-1", result, POOL);
 
     assertEquals(List.of(image), presentation.imageReferences());
     assertEquals(2, presentation.messages().size());
@@ -72,5 +74,6 @@ class OpenAIMessagePresenterTest {
         parts.getFirst().asText().text());
     assertTrue(parts.getLast().asImageUrl().imageUrl().url().contains(
         "key=temporary-images%2Fregion"));
+    assertTrue(parts.getLast().asImageUrl().imageUrl().url().endsWith("&pool=" + POOL));
   }
 }

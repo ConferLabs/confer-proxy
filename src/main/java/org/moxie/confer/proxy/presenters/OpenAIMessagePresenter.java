@@ -33,7 +33,11 @@ public class OpenAIMessagePresenter {
     this.imageToken = imageToken;
   }
 
-  public ToolResultPresentation presentToolResult(String toolCallId, ToolResult result) {
+  /** {@code imagePool} is the requesting connection's normalizer pool, which decodes any images. */
+  public ToolResultPresentation presentToolResult(String     toolCallId,
+                                                  ToolResult result,
+                                                  String     imagePool)
+  {
     List<ChatCompletionMessageParam> messages        = new ArrayList<>();
     List<ImageReference>             imageReferences = result.images();
 
@@ -44,14 +48,16 @@ public class OpenAIMessagePresenter {
     messages.add(ChatCompletionMessageParam.ofTool(toolMessage));
 
     if (!imageReferences.isEmpty()) {
-      messages.add(ChatCompletionMessageParam.ofUser(presentUserMessage(TOOL_IMAGE_CONTEXT, imageReferences)));
+      messages.add(ChatCompletionMessageParam.ofUser(presentUserMessage(TOOL_IMAGE_CONTEXT, imageReferences, imagePool)));
     }
 
     return new ToolResultPresentation(messages, imageReferences);
   }
 
-  public ChatCompletionUserMessageParam presentUserMessage(String content,
-                                                           List<ImageReference> imageReferences)
+  /** {@code imagePool} is the requesting connection's normalizer pool, which decodes the images. */
+  public ChatCompletionUserMessageParam presentUserMessage(String               content,
+                                                           List<ImageReference> imageReferences,
+                                                           String               imagePool)
   {
     List<ChatCompletionContentPart> parts = new ArrayList<>();
 
@@ -63,7 +69,7 @@ public class OpenAIMessagePresenter {
 
     if (imageReferences != null) {
       for (ImageReference reference : imageReferences) {
-        parts.add(presentImage(reference));
+        parts.add(presentImage(reference, imagePool));
       }
     }
 
@@ -72,12 +78,12 @@ public class OpenAIMessagePresenter {
                                          .build();
   }
 
-  private ChatCompletionContentPart presentImage(ImageReference reference) {
+  private ChatCompletionContentPart presentImage(ImageReference reference, String imagePool) {
     String imageUrl = "http://localhost:" + config.getServerPort()
         + "/v1/images?key=" + urlEncode(reference.s3Key())
         + "&ek=" + urlEncode(reference.encryptionKey())
         + "&token=" + urlEncode(imageToken.get())
-        + "&type=" + urlEncode(reference.mediaType());
+        + "&pool=" + imagePool;
 
     ChatCompletionContentPartImage image = ChatCompletionContentPartImage.builder()
         .imageUrl(ChatCompletionContentPartImage.ImageUrl.builder().url(imageUrl).build())

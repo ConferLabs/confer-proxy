@@ -1,5 +1,6 @@
 package org.moxie.confer.proxy.websocket;
 
+import org.moxie.confer.proxy.images.ImagePoolKey;
 import org.moxie.confer.proxy.streaming.StreamRegistry;
 import org.moxie.confer.proxy.workers.WorkerClient;
 import org.moxie.confer.proxy.workers.WorkerWorkspace;
@@ -14,6 +15,7 @@ public class WebsocketConnectionContext {
   private final Instant        expiresAt;
   private final boolean        subscribed;
   private final StreamRegistry streams;
+  private final String         imagePool;
 
   private WorkerWorkspace workerWorkspace;
   private boolean         closed;
@@ -26,10 +28,16 @@ public class WebsocketConnectionContext {
     this.expiresAt        = expiresAt;
     this.subscribed       = subscribed;
     this.streams          = new StreamRegistry();
+    this.imagePool        = ImagePoolKey.generate();
   }
 
   public StreamRegistry getStreams() {
     return streams;
+  }
+
+  /** The normalizer pool that decodes every image this connection sends to vLLM. */
+  public String getImagePool() {
+    return imagePool;
   }
 
   public boolean requiresPayment(Instant now) {

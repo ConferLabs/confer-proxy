@@ -1,6 +1,7 @@
 package org.moxie.confer.proxy.controllers;
 
 import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.BeforeEach;
@@ -8,9 +9,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.stubbing.Answer;
 import org.moxie.confer.proxy.config.Config;
-import org.moxie.confer.proxy.crypto.ChunkedCipher;
 import org.moxie.confer.proxy.crypto.ImageToken;
+import org.moxie.confer.proxy.images.ImageNormalizer;
+import org.moxie.confer.proxy.images.InvalidNormalizedImageException;
+import org.moxie.confer.proxy.images.NormalizedImage;
+import org.moxie.confer.proxy.images.NormalizedImageStream;
+import org.moxie.confer.proxy.images.NormalizerFrames;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.http.AbortableInputStream;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -21,18 +27,30 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.security.GeneralSecurityException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ImageControllerTest {
 
   private static final byte[] JPEG_SIGNATURE = new byte[] { (byte) 0xff, (byte) 0xd8, (byte) 0xff };
+  private static final String POOL           = "0123456789abcdef0123456789abcdef";
+  private static final byte[] PIXELS         = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
 
   @Mock
   private S3Client s3;
@@ -40,16 +58,26 @@ class ImageControllerTest {
   @Mock
   private Config config;
 
-  private ImageToken imageToken;
-  private ImageController controller;
+  @Mock
+  private ImageNormalizer normalizer;
+
+  private ImageToken            imageToken;
+  private ImageController       controller;
+  private NormalizedImageStream stream;
+  private ByteArrayOutputStream sent;
 
   @BeforeEach
-  void setUp() {
+  void setUp() throws Exception {
     imageToken = new ImageToken();
     controller = new ImageController();
     controller.s3 = s3;
     controller.config = config;
     controller.imageToken = imageToken;
+    controller.normalizer = normalizer;
+
+    stream = streamOf(NormalizerFrames.image(2, 2), PIXELS);
+    sent   = new ByteArrayOutputStream();
+    lenient().when(normalizer.normalize(eq(POOL), any())).thenAnswer(sendingTo(sent, stream));
   }
 
   // --- Token validation ---
@@ -57,22 +85,17 @@ class ImageControllerTest {
   @Test
   void rejectsNullToken() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage("key", "ek", null, null));
+      () -> controller.getImage("key", "ek", null, POOL));
     assertEquals(401, ex.getResponse().getStatus());
+    verifyNoInteractions(s3, normalizer);
   }
 
   @Test
   void rejectsWrongToken() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage("key", "ek", "wrong-token", null));
+      () -> controller.getImage("key", "ek", "wrong-token", POOL));
     assertEquals(401, ex.getResponse().getStatus());
-  }
-
-  @Test
-  void acceptsValidToken() {
-    // Valid token should not throw — response is built lazily, S3 isn't hit until streaming
-    Response response = controller.getImage("key", "ek", imageToken.get(), null);
-    assertEquals(200, response.getStatus());
+    verifyNoInteractions(s3, normalizer);
   }
 
   // --- Parameter validation ---
@@ -80,87 +103,118 @@ class ImageControllerTest {
   @Test
   void rejectsMissingKey() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage(null, "ek", imageToken.get(), null));
+      () -> controller.getImage(null, "ek", imageToken.get(), POOL));
     assertEquals(400, ex.getResponse().getStatus());
   }
 
   @Test
   void rejectsBlankKey() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage("  ", "ek", imageToken.get(), null));
+      () -> controller.getImage("  ", "ek", imageToken.get(), POOL));
     assertEquals(400, ex.getResponse().getStatus());
   }
 
   @Test
   void rejectsMalformedObjectStorageKey() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage("../another/object", "ek", imageToken.get(), null));
+      () -> controller.getImage("../another/object", "ek", imageToken.get(), POOL));
     assertEquals(400, ex.getResponse().getStatus());
+  }
+
+  @Test
+  void rejectsMalformedPool() {
+    for (String pool : new String[] { null, "", "user-1", "A".repeat(32) }) {
+      WebApplicationException ex = assertThrows(WebApplicationException.class,
+        () -> controller.getImage("key", "ek", imageToken.get(), pool));
+      assertEquals(400, ex.getResponse().getStatus());
+    }
+    verifyNoInteractions(s3, normalizer);
   }
 
   @Test
   void rejectsMissingEncryptionKey() {
     WebApplicationException ex = assertThrows(WebApplicationException.class,
-      () -> controller.getImage("key", null, imageToken.get(), null));
+      () -> controller.getImage("key", null, imageToken.get(), POOL));
     assertEquals(400, ex.getResponse().getStatus());
   }
 
-  // --- Content type ---
+  // --- Normalization ---
 
   @Test
-  void returnsSpecifiedMediaType() {
-    Response response = controller.getImage("key", "ek", imageToken.get(), "image/png");
-    assertEquals("image/png", response.getMediaType().toString());
-  }
-
-  @Test
-  void defaultsToOctetStream() {
-    Response response = controller.getImage("key", "ek", imageToken.get(), null);
-    assertEquals("application/octet-stream", response.getMediaType().toString());
-  }
-
-  // --- Streaming decrypt ---
-
-  @Test
-  void decryptsAndStreamsS3Object() throws Exception {
+  void streamsTheDecryptedImageInAndThePpmOut() throws Exception {
     byte[] plaintext = withJpegSignature("Hello, this is a test image!".getBytes());
-    byte[] encrypted = encrypt(plaintext);
-    String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
+    stubS3(encrypt(plaintext));
 
-    when(config.getS3Bucket()).thenReturn("test-bucket");
-    when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
-        AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
+    Response              response = controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL);
+    ByteArrayOutputStream body     = new ByteArrayOutputStream();
+    ((StreamingOutput) response.getEntity()).write(body);
 
-    Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), "image/jpeg");
+    NormalizedImage image = NormalizerFrames.image(2, 2);
+    ByteArrayOutputStream expected = new ByteArrayOutputStream();
+    expected.write(image.ppmHeader());
+    expected.write(PIXELS);
+
     assertEquals(200, response.getStatus());
-
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-    stream.write(out);
-
-    assertArrayEquals(plaintext, out.toByteArray());
+    assertEquals(NormalizedImage.MEDIA_TYPE, response.getMediaType().toString());
+    assertEquals(String.valueOf(image.ppmLength()), response.getHeaderString(HttpHeaders.CONTENT_LENGTH));
+    assertArrayEquals(expected.toByteArray(), body.toByteArray());
+    assertArrayEquals(plaintext, sent.toByteArray(), "the normalizer receives the decrypted bytes, header included");
+    verify(stream).close();
   }
 
   @Test
-  void rejectsUnsupportedImageFormatBeforeStreaming() throws Exception {
-    byte[] plaintext = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\n".getBytes();
-    byte[] encrypted = encrypt(plaintext);
-    String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
+  void endsTheResponseAndReleasesTheStreamWhenStreamingFails() throws Exception {
+    stubS3(encrypt(withJpegSignature(new byte[64])));
+    doThrow(new IOException("Normalized image is truncated")).when(stream).writeTo(any());
 
-    when(config.getS3Bucket()).thenReturn("test-bucket");
-    when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
-        AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
+    Response response = controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL);
 
-    Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), "image/png");
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    assertThrows(IOException.class, () -> ((StreamingOutput) response.getEntity()).write(new ByteArrayOutputStream()));
+    verify(stream).close();
+  }
 
-    WebApplicationException error = assertThrows(WebApplicationException.class, () -> stream.write(out));
+  @Test
+  void normalizesTheImageAgainOnEveryRequest() throws Exception {
+    stubS3(encrypt(withJpegSignature(new byte[64])));
+
+    controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL);
+    controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL);
+
+    verify(s3, times(2)).getObject(any(GetObjectRequest.class));
+    verify(normalizer, times(2)).normalize(eq(POOL), any());
+  }
+
+  @Test
+  void rejectsUnsupportedImageFormatsBeforeTheNormalizer() throws Exception {
+    stubS3(encrypt("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 1 1\n".getBytes()));
+
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL));
 
     assertEquals(415, error.getResponse().getStatus());
-    assertEquals(0, out.size());
+    verifyNoInteractions(normalizer);
+  }
+
+  @Test
+  void rejectsImagesTheNormalizerCannotConvert() throws Exception {
+    stubS3(encrypt(withJpegSignature(new byte[64])));
+    when(normalizer.normalize(eq(POOL), any())).thenThrow(new InvalidNormalizedImageException("Normalized image has no header"));
+
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL));
+
+    assertEquals(422, error.getResponse().getStatus());
+  }
+
+  @Test
+  void failsWhenTheNormalizerIsUnavailable() throws Exception {
+    stubS3(encrypt(withJpegSignature(new byte[64])));
+    when(normalizer.normalize(eq(POOL), any())).thenThrow(new IOException("Connection refused"));
+
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL));
+
+    assertEquals(500, error.getResponse().getStatus());
   }
 
   @Test
@@ -171,30 +225,18 @@ class ImageControllerTest {
           GetObjectResponse.builder().contentLength(65L * 1024 * 1024).build(),
           AbortableInputStream.create(new ByteArrayInputStream(new byte[0]))));
 
-    Response response = controller.getImage(
-        "opaque-namespace/image",
-        Base64.getEncoder().encodeToString(new byte[32]),
-        imageToken.get(),
-        "image/jpeg");
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-
-    WebApplicationException error = assertThrows(
-        WebApplicationException.class,
-        () -> stream.write(new ByteArrayOutputStream()));
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("opaque-namespace/image", Base64.getEncoder().encodeToString(new byte[32]), imageToken.get(), POOL));
 
     assertEquals(500, error.getResponse().getStatus());
+    verifyNoInteractions(normalizer);
   }
 
-  // --- Corruption mid-stream ---
+  // --- Decryption failures ---
 
   @Test
-  void throwsWhenCorruptedMidStream() throws Exception {
-    // Use the default chunk size (64 KB) so each encrypted chunk exceeds
-    // the 64 KB read buffer in ImageController. The first chunk decrypts
-    // successfully and its plaintext is written to the output. The second
-    // chunk is corrupted, so the exception fires after data is already
-    // on the wire — exactly the scenario we're worried about.
-    int chunkSize = 64 * 1024;
+  void failsWhenCorruptedWhileStreamingToTheNormalizer() throws Exception {
+    int    chunkSize = 64 * 1024;
     byte[] plaintext = new byte[chunkSize * 2];
     java.util.Arrays.fill(plaintext, (byte) 'A');
     System.arraycopy(JPEG_SIGNATURE, 0, plaintext, 0, JPEG_SIGNATURE.length);
@@ -207,28 +249,17 @@ class ImageControllerTest {
     int secondChunkCiphertextOffset = 21 + firstEncChunkSize + 12; // skip header + chunk1 + chunk2 IV
     encrypted[secondChunkCiphertextOffset] ^= 0xFF;
 
-    String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
+    stubS3(encrypted);
 
-    when(config.getS3Bucket()).thenReturn("test-bucket");
-    when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
-        AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL));
 
-    Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), null);
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-    // The StreamingOutput should throw — the container would then reset the connection.
-    WebApplicationException ex = assertThrows(WebApplicationException.class, () -> stream.write(out));
-    assertEquals(500, ex.getResponse().getStatus());
-
-    // Some data was already written before corruption was detected
-    assertTrue(out.size() > 0, "Some bytes should have been written before the error");
+    assertEquals(500, error.getResponse().getStatus());
   }
 
   @Test
-  void throwsWhenTruncated() throws Exception {
-    int chunkSize = 64;
+  void failsWhenTruncated() throws Exception {
+    int    chunkSize = 64;
     byte[] plaintext = new byte[chunkSize * 2];
     java.util.Arrays.fill(plaintext, (byte) 'B');
     System.arraycopy(JPEG_SIGNATURE, 0, plaintext, 0, JPEG_SIGNATURE.length);
@@ -236,56 +267,80 @@ class ImageControllerTest {
     byte[] encrypted = encrypt(plaintext, chunkSize);
 
     // Truncate: cut off the last 20 bytes (removes part of the final chunk)
-    byte[] truncated = java.util.Arrays.copyOf(encrypted, encrypted.length - 20);
+    stubS3(java.util.Arrays.copyOf(encrypted, encrypted.length - 20));
 
-    String base64Key = Base64.getEncoder().encodeToString(testKey().getEncoded());
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", testKeyBase64(), imageToken.get(), POOL));
 
-    when(config.getS3Bucket()).thenReturn("test-bucket");
-    when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) truncated.length).build(),
-        AbortableInputStream.create(new ByteArrayInputStream(truncated))));
-
-    Response response = controller.getImage("attachments/test.enc", base64Key, imageToken.get(), null);
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-    assertThrows(WebApplicationException.class, () -> stream.write(out));
+    assertEquals(500, error.getResponse().getStatus());
   }
 
   @Test
-  void throwsWhenWrongKey() throws Exception {
-    byte[] plaintext = "Secret content".getBytes();
-    byte[] encrypted = encrypt(plaintext);
+  void failsWhenWrongKey() throws Exception {
+    stubS3(encrypt("Secret content".getBytes()));
 
-    // Generate a different key
-    KeyGenerator gen = KeyGenerator.getInstance("AES");
-    gen.init(256);
-    SecretKey wrongKey = gen.generateKey();
-    String wrongBase64Key = Base64.getEncoder().encodeToString(wrongKey.getEncoded());
+    WebApplicationException error = assertThrows(WebApplicationException.class,
+      () -> controller.getImage("attachments/test.enc", otherKeyBase64(), imageToken.get(), POOL));
 
-    when(config.getS3Bucket()).thenReturn("test-bucket");
-    when(s3.getObject(any(GetObjectRequest.class)))
-      .thenReturn(new ResponseInputStream<>(GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
-        AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
-
-    Response response = controller.getImage("attachments/test.enc", wrongBase64Key, imageToken.get(), null);
-    StreamingOutput stream = (StreamingOutput) response.getEntity();
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
-
-    assertThrows(WebApplicationException.class, () -> stream.write(out));
+    assertEquals(500, error.getResponse().getStatus());
+    verifyNoInteractions(normalizer);
   }
 
   // --- Helpers ---
 
   private static SecretKey testKey;
 
+  /** Like the real normalizer: reads the whole image (surfacing decryption failures), then answers. */
+  private static Answer<NormalizedImageStream> sendingTo(OutputStream sent, NormalizedImageStream stream) {
+    return invocation -> {
+      ((InputStream) invocation.getArgument(1)).transferTo(sent);
+      return stream;
+    };
+  }
+
+  private static NormalizedImageStream streamOf(NormalizedImage image, byte[] pixels) throws IOException {
+    NormalizedImageStream stream = mock(NormalizedImageStream.class);
+    lenient().when(stream.image()).thenReturn(image);
+    lenient().doAnswer(invocation -> {
+      OutputStream output = invocation.getArgument(0);
+      output.write(image.ppmHeader());
+      output.write(pixels);
+      return null;
+    }).when(stream).writeTo(any());
+    return stream;
+  }
+  private static SecretKey otherKey;
+
+  private void stubS3(byte[] encrypted) {
+    when(config.getS3Bucket()).thenReturn("test-bucket");
+    when(s3.getObject(any(GetObjectRequest.class)))
+      .thenAnswer(invocation -> new ResponseInputStream<>(
+          GetObjectResponse.builder().contentLength((long) encrypted.length).build(),
+          AbortableInputStream.create(new ByteArrayInputStream(encrypted))));
+  }
+
   private static SecretKey testKey() throws NoSuchAlgorithmException {
     if (testKey == null) {
-      KeyGenerator gen = KeyGenerator.getInstance("AES");
-      gen.init(256);
-      testKey = gen.generateKey();
+      testKey = generateKey();
     }
     return testKey;
+  }
+
+  private static String testKeyBase64() throws NoSuchAlgorithmException {
+    return Base64.getEncoder().encodeToString(testKey().getEncoded());
+  }
+
+  private static String otherKeyBase64() throws NoSuchAlgorithmException {
+    if (otherKey == null) {
+      otherKey = generateKey();
+    }
+    return Base64.getEncoder().encodeToString(otherKey.getEncoded());
+  }
+
+  private static SecretKey generateKey() throws NoSuchAlgorithmException {
+    KeyGenerator gen = KeyGenerator.getInstance("AES");
+    gen.init(256);
+    return gen.generateKey();
   }
 
   private static byte[] withJpegSignature(byte[] body) {

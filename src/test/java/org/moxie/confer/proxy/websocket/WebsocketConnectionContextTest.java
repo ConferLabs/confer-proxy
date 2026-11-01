@@ -1,6 +1,7 @@
 package org.moxie.confer.proxy.websocket;
 
 import org.junit.jupiter.api.Test;
+import org.moxie.confer.proxy.images.ImagePoolKey;
 import org.moxie.confer.proxy.workers.WorkerClient;
 import org.moxie.confer.proxy.workers.WorkerWorkspace;
 
@@ -11,6 +12,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -54,6 +57,16 @@ class WebsocketConnectionContextTest {
 
     verify(client).getWorkspace(ATTACHMENT_PREFIX);
     context.close();
+  }
+
+  @Test
+  void givesEachConnectionItsOwnImagePoolEvenForTheSameUser() {
+    WebsocketConnectionContext first  = context();
+    WebsocketConnectionContext second = context();
+
+    assertTrue(ImagePoolKey.isWellFormed(first.getImagePool()));
+    assertEquals(first.getImagePool(), first.getImagePool());
+    assertNotEquals(first.getImagePool(), second.getImagePool());
   }
 
   @Test
