@@ -1,6 +1,7 @@
 package org.moxie.confer.proxy.controllers;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.openai.client.OpenAIClient;
 import com.openai.core.JsonValue;
@@ -22,6 +23,7 @@ import com.openai.models.chat.completions.ChatCompletionMessageToolCall;
 import com.openai.models.completions.CompletionUsage;
 import com.openai.models.chat.completions.ChatCompletionToolMessageParam;
 import com.openai.models.chat.completions.ChatCompletionUserMessageParam;
+import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validator;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Response;
@@ -117,17 +119,41 @@ public class OpenAIWebsocketHandler implements WebsocketHandler {
       throw new WebApplicationException("Request body is required", 400);
     }
 
+    ChatRequest chatRequest;
+
     try {
-      ChatRequest chatRequest = mapper.readValue(request.body().get(), ChatRequest.class);
-
-      if (chatRequest == null || !validator.validate(chatRequest).isEmpty()) {
-        throw new WebApplicationException("Invalid ChatRequest body", 400);
-      }
-
-      return chatRequest;
+      chatRequest = mapper.readValue(request.body().get(), ChatRequest.class);
+    } catch (JsonMappingException error) {
+      log.warn("Unreadable ChatRequest field: {}", error.getPathReference());
+      throw new WebApplicationException("Invalid ChatRequest body", 400);
     } catch (JsonProcessingException error) {
+      log.warn("Malformed ChatRequest JSON");
       throw new WebApplicationException("Invalid ChatRequest body", 400);
     }
+
+    if (chatRequest == null) {
+      log.warn("Empty ChatRequest body");
+      throw new WebApplicationException("Invalid ChatRequest body", 400);
+    }
+
+    Set<ConstraintViolation<ChatRequest>> violations = validator.validate(chatRequest);
+
+    if (!violations.isEmpty()) {
+      log.warn("ChatRequest failed validation: {}", describeViolations(violations));
+      throw new WebApplicationException("Invalid ChatRequest body", 400);
+    }
+
+    return chatRequest;
+  }
+
+  // Field paths and constraint names only (e.g. "clientTools[3].parameters NotNull"),
+  // never the rejected values, which can carry message content.
+  private static String describeViolations(Set<ConstraintViolation<ChatRequest>> violations) {
+    return violations.stream()
+                     .map(violation -> violation.getPropertyPath() + " " +
+                                       violation.getConstraintDescriptor().getAnnotation().annotationType().getSimpleName())
+                     .sorted()
+                     .collect(Collectors.joining(", "));
   }
 
   // No tool loop runs on this path, but the request's tool definitions still

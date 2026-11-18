@@ -32,7 +32,9 @@ public record ChatRequest(
   Boolean json,
   Boolean thinking,
   Boolean webSearch,
-  @Size(max = 128) @Valid List<@NotNull ClientTool> clientTools,
+  // The tool count is not capped: what tools cost is their size in the prompt,
+  // and vLLM already rejects a prompt that exceeds the context window.
+  @Valid List<@NotNull ClientTool> clientTools,
   @Size(max = 1_000) @Valid List<@NotNull DocumentReference> documents,
   @Pattern(regexp = "auto|none") String toolChoice
 ) {

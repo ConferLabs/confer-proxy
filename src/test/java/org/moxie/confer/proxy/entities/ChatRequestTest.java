@@ -154,6 +154,21 @@ class ChatRequestTest {
     assertEquals(Set.of("imageRefCountWithinLimit"), propertyPaths(validator.validate(requestWith(overLimit))));
   }
 
+  @Test
+  void toolCountIsNotCapped() {
+    List<ChatRequest.ClientTool> tools = new ArrayList<>();
+
+    for (int i = 0; i < 1_000; i++) {
+      tools.add(new ChatRequest.ClientTool("tool_" + i, "Tool " + i, Map.of()));
+    }
+
+    ChatRequest request = new ChatRequest(
+        List.of(new ChatRequest.Message(ChatRequest.Role.user, "Hello", null)),
+        "model", null, null, null, null, null, null, null, null, true, null, null, null, tools);
+
+    assertTrue(validator.validate(request).isEmpty());
+  }
+
   private ChatRequest requestWith(List<ChatRequest.Message> messages) {
     return new ChatRequest(messages, "model", null, null, null, null, null, null, null, null, true, null, null, null, null);
   }
